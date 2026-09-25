@@ -21,11 +21,17 @@ calling the model. Results show both full IDs, source findings, and skipped chan
 Export review downloads JSON. Full repository remains available in Review scope.
 
 Local input requires a main Git repository with a `.git` directory. Linked
-worktrees are excluded. Comparisons are bounded to 100 changed files and 120,000
-bytes of review input; oversized input fails with an error. This version uses a
-single model request and does not split large comparisons into multiple reviews.
+worktrees are excluded. A comparison accepts up to 1,000 changed files and 8 MiB
+of prepared review input. Larger comparisons fail with an error. The engine
+splits accepted comparisons into requests of at most 120,000 bytes, preserving
+the changed lines and their original base or head locations.
 If all changed files are unsupported, results state that no source was reviewed
 and no model request was made.
+
+Results show completed and total batches. Each successful batch saves its
+findings. Retry resumes from those batches if the revisions, model settings, and
+batch inputs still match. Partial results stay labeled incomplete until every
+batch finishes. Stop prevents further requests after the current request ends.
 
 Text processing has separate limits: 1 MiB per file revision and 8 MiB of source
 reads per comparison. The review input limit covers the patch and its metadata.
@@ -165,6 +171,7 @@ Relevant existing code:
    areas from AGENTS.md. Run any migration twice. Verify the Docker flow with a
    mock model, then separately validate the configured live endpoint when approved.
 
-The supplied endpoint, model availability, context limit, and Docker/Tailscale
-reachability have not been tested. Verification uses disposable Git fixtures, a
-mock model, and an isolated database. Live connectivity remains a separate step.
+Verification uses disposable Git fixtures, a mock model, and an isolated
+database. The supplied Qwen endpoint passed a connection and response-format
+check from the isolated engine. Multi-batch tests cover complete changed-line
+coverage, saved progress, retries, cancellation, and failures.

@@ -1,6 +1,7 @@
 """Run bounded source reviews without entering the executable workflow pipeline."""
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -151,19 +152,86 @@ def _remote_repository(repo_full, directory, github_token, commits):
 
 
 def prepare_diff(scan, config):
+    limits = {"max_files": 1000, "max_bytes": 8 * 1024 * 1024, "batch_bytes": 120_000}
     if scan.get("repo_kind") == "local":
         return collect_local_commit_diff(
             os.getenv("LOCAL_REPOS_PATH", "/local_repos"),
             scan["repo_full"],
             scan["base_commit_sha"],
             scan["commit_sha"],
+            **limits,
         )
     with tempfile.TemporaryDirectory(prefix="commit-review-") as temporary:
         source = Path(temporary) / "repository.git"
         _remote_repository(
             scan["repo_full"], source, config.github_token, [scan["base_commit_sha"], scan["commit_sha"]]
         )
-        return collect_commit_diff(str(source), scan["base_commit_sha"], scan["commit_sha"])
+        return collect_commit_diff(str(source), scan["base_commit_sha"], scan["commit_sha"], **limits)
+
+
+def _batch_hashes(batches):
+    return [
+        hashlib.sha256(
+            json.dumps(batch, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        for batch in batches
+    ]
+
+
+def _checkpoint(diff, hashes, settings, findings, completed):
+    return {
+        "base_commit": diff["base_commit"],
+        "head_commit": diff["head_commit"],
+        "files": diff["files"],
+        "unreviewed": diff["unreviewed"],
+        "no_changes": diff["no_changes"],
+        "findings": findings,
+        "batches_completed": completed,
+        "batches_total": len(hashes),
+        "batch_hashes": hashes,
+        "model_snapshot": {"base_url": settings["base_url"], "model": settings["model"]},
+    }
+
+
+def _resume_checkpoint(previous, diff, hashes, settings):
+    if not isinstance(previous, dict):
+        return [], 0
+    if any(
+        (
+            previous.get("base_commit") != diff["base_commit"],
+            previous.get("head_commit") != diff["head_commit"],
+            previous.get("batch_hashes") != hashes,
+            previous.get("batches_total") != len(hashes),
+            previous.get("model_snapshot") != {"base_url": settings["base_url"], "model": settings["model"]},
+        )
+    ):
+        return [], 0
+    completed = previous.get("batches_completed")
+    findings = previous.get("findings")
+    if isinstance(completed, bool) or not isinstance(completed, int) or not 0 <= completed <= len(hashes):
+        return [], 0
+    if not isinstance(findings, list):
+        return [], 0
+    return findings, completed
+
+
+def _attempt_is_running(conn, scan_id, marker):
+    row = conn.execute("SELECT status, last_resumed_at FROM public.scans WHERE id = %s", (scan_id,)).fetchone()
+    conn.commit()
+    return bool(row and row["status"] == "running" and row["last_resumed_at"] == marker)
+
+
+def _save_checkpoint(conn, scan_id, marker, result, *, completed=False):
+    status = ", status = 'completed', reasoning = NULL" if completed else ""
+    row = conn.execute(
+        f"""UPDATE public.scans SET extras = CASE WHEN jsonb_typeof(extras) = 'object'
+                   THEN extras ELSE '{{}}'::jsonb END || %s{status}, updated_at = now()
+               WHERE id = %s AND status = 'running' AND last_resumed_at IS NOT DISTINCT FROM %s
+               RETURNING id""",
+        (Jsonb({"diff_review": result}), scan_id, marker),
+    ).fetchone()
+    conn.commit()
+    return bool(row)
 
 
 def process_commit_review(db, config, scan_id):
@@ -197,24 +265,36 @@ def process_commit_review(db, config, scan_id):
             conn.commit()
             if not row:
                 return False
-            findings = []
-            if not diff["no_changes"] and diff["files"]:
+            batches = diff["batches"]
+            if (
+                not isinstance(batches, list)
+                or (diff["files"] and not batches)
+                or (diff["no_changes"] and (diff["files"] or batches))
+            ):
+                raise ValueError("Collected source review batches are invalid.")
+            hashes = _batch_hashes(batches)
+            previous = (scan.get("extras") or {}).get("diff_review")
+            findings, completed = _resume_checkpoint(previous, diff, hashes, settings)
+            if not _save_checkpoint(conn, scan_id, marker, _checkpoint(diff, hashes, settings, findings, completed)):
+                return False
+            for batch in batches[completed:]:
+                if not _attempt_is_running(conn, scan_id, marker):
+                    return False
                 settings = local_settings()
                 if (
                     settings["base_url"] != scan["configuration"]["self_hosted_base_url"]
                     or settings["model"] != scan["model"]
                 ):
                     raise ValueError("Self-hosted AI configuration changed. Create a new review.")
-                findings = review_diff(diff, **settings)["findings"]
-            result = {key: value for key, value in diff.items() if key != "patch"}
-            result["findings"] = findings
-            conn.execute(
-                """UPDATE public.scans SET extras = CASE WHEN jsonb_typeof(extras) = 'object' THEN extras ELSE '{}'::jsonb END || %s,
-                   status = 'completed', reasoning = NULL, updated_at = now()
-                   WHERE id = %s AND status = 'running' AND last_resumed_at IS NOT DISTINCT FROM %s""",
-                (Jsonb({"diff_review": result}), scan_id, marker),
-            )
-            conn.commit()
+                findings = [*findings, *review_diff(batch, **settings, timeout_seconds=300)["findings"]]
+                completed += 1
+                if not _save_checkpoint(
+                    conn, scan_id, marker, _checkpoint(diff, hashes, settings, findings, completed)
+                ):
+                    return False
+            result = _checkpoint(diff, hashes, settings, findings, completed)
+            if not _save_checkpoint(conn, scan_id, marker, result, completed=True):
+                return False
             return True
         except Exception as exc:
             conn.rollback()

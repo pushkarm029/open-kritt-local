@@ -438,6 +438,202 @@ def _unified_patch(old_text: str, new_text: str, old_path: str, new_path: str) -
     return "".join(patch)
 
 
+@dataclass(frozen=True)
+class _PatchLine:
+    marker: str
+    source: str
+    base_before: int
+    head_before: int
+    base_line: int | None
+    head_line: int | None
+
+
+@dataclass(frozen=True)
+class _FileFragment:
+    metadata: dict
+    hunks: tuple[str, ...]
+
+
+def _serialized_bytes(value: dict) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _range_header(start: int, count: int) -> str:
+    if count == 0:
+        return f"{start},0"
+    if count == 1:
+        return str(start + 1)
+    return f"{start + 1},{count}"
+
+
+def _patch_lines(
+    group: list[tuple[str, int, int, int, int]], base_lines: list[str], head_lines: list[str]
+) -> list[_PatchLine]:
+    lines: list[_PatchLine] = []
+    for tag, base_start, base_end, head_start, head_end in group:
+        if tag == "equal":
+            for base_index, head_index in zip(range(base_start, base_end), range(head_start, head_end), strict=True):
+                lines.append(
+                    _PatchLine(" ", base_lines[base_index], base_index, head_index, base_index + 1, head_index + 1)
+                )
+        else:
+            for base_index in range(base_start, base_end):
+                lines.append(_PatchLine("-", base_lines[base_index], base_index, head_start, base_index + 1, None))
+            for head_index in range(head_start, head_end):
+                lines.append(_PatchLine("+", head_lines[head_index], base_end, head_index, None, head_index + 1))
+    return lines
+
+
+def _render_hunk(lines: list[_PatchLine]) -> str:
+    first = lines[0]
+    base_count = sum(line.marker != "+" for line in lines)
+    head_count = sum(line.marker != "-" for line in lines)
+    header = f"@@ -{_range_header(first.base_before, base_count)} +{_range_header(first.head_before, head_count)} @@\n"
+    body: list[str] = []
+    for line in lines:
+        body.append(line.marker + line.source)
+        if not line.source.endswith("\n"):
+            body.append("\n\\ No newline at end of file\n")
+    return header + "".join(body)
+
+
+def _line_ranges(numbers: list[int]) -> list[list[int]]:
+    ranges: list[list[int]] = []
+    for number in numbers:
+        if ranges and number <= ranges[-1][1] + 1:
+            ranges[-1][1] = max(ranges[-1][1], number)
+        else:
+            ranges.append([number, number])
+    return ranges
+
+
+def _fragment_from_lines(metadata: dict, lines: list[_PatchLine]) -> _FileFragment:
+    item = {
+        **metadata,
+        "base_changed_lines": _line_ranges([line.base_line for line in lines if line.marker == "-"]),
+        "head_changed_lines": _line_ranges([line.head_line for line in lines if line.marker == "+"]),
+    }
+    return _FileFragment(item, (_render_hunk(lines),))
+
+
+def _merge_ranges(first: list[list[int]], second: list[list[int]]) -> list[list[int]]:
+    merged = [part.copy() for part in first]
+    for start, end in second:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _merge_fragments(first: _FileFragment, second: _FileFragment) -> _FileFragment:
+    metadata = {
+        **first.metadata,
+        "base_changed_lines": _merge_ranges(
+            first.metadata["base_changed_lines"], second.metadata["base_changed_lines"]
+        ),
+        "head_changed_lines": _merge_ranges(
+            first.metadata["head_changed_lines"], second.metadata["head_changed_lines"]
+        ),
+    }
+    return _FileFragment(metadata, first.hunks + second.hunks)
+
+
+def _fragment_patch(fragment: _FileFragment) -> str:
+    base_path = fragment.metadata["base_path"] or ""
+    head_path = fragment.metadata["head_path"] or ""
+    return f"--- {_patch_path('a', base_path)}\n+++ {_patch_path('b', head_path)}\n" + "".join(fragment.hunks)
+
+
+def _batch_diff(base: str, head: str, fragments: list[_FileFragment]) -> dict:
+    return {
+        "base_commit": base,
+        "head_commit": head,
+        "patch": "".join(_fragment_patch(fragment) for fragment in fragments),
+        "files": [fragment.metadata for fragment in fragments],
+        "unreviewed": [],
+        "no_changes": False,
+    }
+
+
+def _split_hunk(
+    metadata: dict,
+    lines: list[_PatchLine],
+    base: str,
+    head: str,
+    batch_bytes: int,
+) -> list[_FileFragment]:
+    fragments: list[_FileFragment] = []
+    start = 0
+
+    def fits(begin: int, end: int) -> bool:
+        fragment = _fragment_from_lines(metadata, lines[begin:end])
+        return _serialized_bytes(_batch_diff(base, head, [fragment])) <= batch_bytes
+
+    while start < len(lines):
+        changed = next((index for index in range(start, len(lines)) if lines[index].marker != " "), None)
+        if changed is None:
+            break
+        minimum_end = changed + 1
+        while start < changed and not fits(start, minimum_end):
+            start += 1
+        if not fits(start, minimum_end):
+            raise CommitDiffError("a changed source line or its file metadata exceeds the batch byte limit")
+
+        if fits(start, len(lines)):
+            end = len(lines)
+        else:
+            low, high = minimum_end, len(lines)
+            while low + 1 < high:
+                middle = (low + high) // 2
+                if fits(start, middle):
+                    low = middle
+                else:
+                    high = middle
+            end = low
+        fragments.append(_fragment_from_lines(metadata, lines[start:end]))
+        start = end
+    return fragments
+
+
+def _build_batches(
+    base: str,
+    head: str,
+    sources: list[tuple[dict, list[str], list[str], difflib.SequenceMatcher]],
+    batch_bytes: int,
+) -> list[dict]:
+    fragments: list[_FileFragment] = []
+    for metadata, base_lines, head_lines, matcher in sources:
+        current: _FileFragment | None = None
+        for group in matcher.get_grouped_opcodes(n=10):
+            for part in _split_hunk(metadata, _patch_lines(group, base_lines, head_lines), base, head, batch_bytes):
+                if current is None:
+                    current = part
+                    continue
+                combined = _merge_fragments(current, part)
+                if _serialized_bytes(_batch_diff(base, head, [combined])) <= batch_bytes:
+                    current = combined
+                else:
+                    fragments.append(current)
+                    current = part
+        if current is not None:
+            fragments.append(current)
+
+    batches: list[dict] = []
+    current_batch: list[_FileFragment] = []
+    for fragment in fragments:
+        duplicate_path = any(item.metadata["path"] == fragment.metadata["path"] for item in current_batch)
+        if current_batch and (
+            duplicate_path or _serialized_bytes(_batch_diff(base, head, [*current_batch, fragment])) > batch_bytes
+        ):
+            batches.append(_batch_diff(base, head, current_batch))
+            current_batch = []
+        current_batch.append(fragment)
+    if current_batch:
+        batches.append(_batch_diff(base, head, current_batch))
+    return batches
+
+
 def collect_commit_diff(
     repo_dir: str | os.PathLike[str],
     base_commit: str,
@@ -445,10 +641,13 @@ def collect_commit_diff(
     *,
     max_bytes: int = 120_000,
     max_files: int = 100,
+    batch_bytes: int | None = None,
 ) -> dict:
     """Compare explicit committed object IDs in an existing Git directory."""
 
-    return _collect_commit_diff(repo_dir, base_commit, head_commit, max_bytes=max_bytes, max_files=max_files)
+    return _collect_commit_diff(
+        repo_dir, base_commit, head_commit, max_bytes=max_bytes, max_files=max_files, batch_bytes=batch_bytes
+    )
 
 
 def collect_local_commit_diff(
@@ -459,6 +658,7 @@ def collect_local_commit_diff(
     *,
     max_bytes: int = 120_000,
     max_files: int = 100,
+    batch_bytes: int | None = None,
 ) -> dict:
     """Compare commits from a repository pinned beneath a configured local root.
 
@@ -501,6 +701,7 @@ def collect_local_commit_diff(
             head_commit,
             max_bytes=max_bytes,
             max_files=max_files,
+            batch_bytes=batch_bytes,
             location=location,
         )
     except CommitDiffError:
@@ -520,6 +721,7 @@ def _collect_commit_diff(
     *,
     max_bytes: int,
     max_files: int,
+    batch_bytes: int | None = None,
     location: _GitLocation | None = None,
 ) -> dict:
     """Return bounded source changes between two explicit commit object IDs.
@@ -533,6 +735,12 @@ def _collect_commit_diff(
         raise CommitDiffError(f"max_bytes must be between 1 and {_MAX_BYTES_LIMIT}")
     if isinstance(max_files, bool) or not isinstance(max_files, int) or not 1 <= max_files <= _MAX_FILES_LIMIT:
         raise CommitDiffError(f"max_files must be between 1 and {_MAX_FILES_LIMIT}")
+    if batch_bytes is not None and (
+        isinstance(batch_bytes, bool)
+        or not isinstance(batch_bytes, int)
+        or not 1 <= batch_bytes <= _MAX_REVIEW_INPUT_BYTES
+    ):
+        raise CommitDiffError(f"batch_bytes must be between 1 and {_MAX_REVIEW_INPUT_BYTES}")
     if location is None and not Path(repo_dir).is_dir():
         raise CommitDiffError("repository directory is unavailable")
 
@@ -548,7 +756,7 @@ def _collect_commit_diff(
     except CommitDiffError as exc:
         raise CommitDiffError(str(exc), field="commit_sha") from exc
     if base_tree == head_tree:
-        return {
+        result = {
             "base_commit": base,
             "head_commit": head,
             "patch": "",
@@ -556,6 +764,9 @@ def _collect_commit_diff(
             "unreviewed": [],
             "no_changes": True,
         }
+        if batch_bytes is not None:
+            result["batches"] = []
+        return result
 
     raw_limit = max_files * 8400 + 1
     raw_output = _run_git(
@@ -640,6 +851,7 @@ def _collect_commit_diff(
 
     files: list[dict] = []
     patch_parts: list[str] = []
+    batch_sources: list[tuple[dict, list[str], list[str], difflib.SequenceMatcher]] = []
     for change in candidates:
         if change.old_object in binary_objects or change.new_object in binary_objects:
             unreviewed.append(
@@ -675,21 +887,22 @@ def _collect_commit_diff(
         opcodes = matcher.get_opcodes()
         file_patch = _unified_patch(old_text, new_text, old_path or "", new_path or "")
         patch_parts.append(file_patch)
-        files.append(
-            {
-                "path": new_path or old_path,
-                "base_path": old_path,
-                "head_path": new_path,
-                "status": status,
-                "base_lines": len(old_lines),
-                "head_lines": len(new_lines),
-                "base_changed_lines": _changed_ranges(opcodes, "base"),
-                "head_changed_lines": _changed_ranges(opcodes, "head"),
-            }
-        )
+        metadata = {
+            "path": new_path or old_path,
+            "base_path": old_path,
+            "head_path": new_path,
+            "status": status,
+            "base_lines": len(old_lines),
+            "head_lines": len(new_lines),
+            "base_changed_lines": _changed_ranges(opcodes, "base"),
+            "head_changed_lines": _changed_ranges(opcodes, "head"),
+        }
+        files.append(metadata)
+        if batch_bytes is not None:
+            batch_sources.append((metadata, old_lines, new_lines, matcher))
 
     patch = "".join(patch_parts)
-    input_limit = min(max_bytes, _MAX_REVIEW_INPUT_BYTES)
+    input_limit = max_bytes if batch_bytes is not None else min(max_bytes, _MAX_REVIEW_INPUT_BYTES)
     if len(patch.encode("utf-8")) > input_limit:
         raise CommitDiffError("comparison exceeds the configured patch byte limit")
     result = {
@@ -700,7 +913,8 @@ def _collect_commit_diff(
         "unreviewed": unreviewed,
         "no_changes": False,
     }
-    serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(serialized) > input_limit:
+    if _serialized_bytes(result) > input_limit:
         raise CommitDiffError("comparison exceeds the configured review input byte limit")
+    if batch_bytes is not None:
+        result["batches"] = _build_batches(base, head, batch_sources, batch_bytes)
     return result

@@ -27,6 +27,8 @@ class Connection:
             return Result({"acquired": self.locked})
         if "pg_advisory_unlock" in sql:
             return Result(None)
+        if "SELECT status, last_resumed_at" in sql:
+            return Result({"status": self.scan["status"], "last_resumed_at": self.scan["last_resumed_at"]})
         assert "last_resumed_at IS NOT DISTINCT FROM" in sql
         marker = params[-1]
         if self.scan["status"] != "running" or self.scan["last_resumed_at"] != marker:
@@ -36,8 +38,12 @@ class Connection:
             return Result({"id": self.scan["id"]})
         if "status = 'completed'" in sql:
             self.scan.update(status="completed", extras=params[0].obj)
+            return Result({"id": self.scan["id"]})
         elif "status = 'failed'" in sql:
             self.scan.update(status="failed", reasoning=params[0].obj)
+        elif "diff_review" in params[0].obj:
+            self.scan.update(extras=params[0].obj)
+            return Result({"id": self.scan["id"]})
         return Result(None)
 
     def commit(self):
@@ -80,6 +86,7 @@ def review(monkeypatch):
         "unreviewed": [],
         "no_changes": False,
     }
+    diff["batches"] = [dict(diff)]
     monkeypatch.setattr(
         commit_review,
         "local_settings",
@@ -101,6 +108,8 @@ def test_pins_before_inference_and_does_not_store_patch(review, monkeypatch):
     assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
     assert scan["status"] == "completed"
     assert "patch" not in scan["extras"]["diff_review"]
+    assert "batches" not in scan["extras"]["diff_review"]
+    assert scan["extras"]["diff_review"]["batches_completed"] == 1
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -116,16 +125,36 @@ def test_old_attempt_cannot_overwrite_new_retry(review, monkeypatch, fails):
     monkeypatch.setattr(commit_review, "review_diff", infer)
     commit_review.process_commit_review(db, SimpleNamespace(), 4)
     assert scan["status"] == "running"
-    assert "reasoning" not in scan and "extras" not in scan
+    assert "reasoning" not in scan
+    assert scan["extras"]["diff_review"]["batches_completed"] == 0
 
 
 def test_no_changes_never_calls_model(review, monkeypatch):
     scan, diff, db = review
-    diff.update(no_changes=True, files=[], patch="")
+    diff.update(no_changes=True, files=[], patch="", batches=[])
     monkeypatch.setattr(commit_review, "review_diff", lambda *_args, **_kwargs: pytest.fail("unexpected inference"))
     commit_review.process_commit_review(db, SimpleNamespace(), 4)
     assert scan["status"] == "completed"
     assert scan["extras"]["diff_review"]["findings"] == []
+
+
+def test_all_skipped_changes_complete_without_model(review, monkeypatch):
+    scan, diff, db = review
+    diff.update(files=[], patch="", batches=[], unreviewed=[{"path": "image.bin", "reason": "binary content"}])
+    monkeypatch.setattr(commit_review, "review_diff", lambda *_args, **_kwargs: pytest.fail("unexpected inference"))
+    assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "completed"
+    assert scan["extras"]["diff_review"]["unreviewed"] == diff["unreviewed"]
+    assert scan["extras"]["diff_review"]["batches_total"] == 0
+
+
+def test_reviewable_files_without_batches_fail_instead_of_claiming_completion(review, monkeypatch):
+    scan, diff, db = review
+    diff["batches"] = []
+    monkeypatch.setattr(commit_review, "review_diff", lambda *_args, **_kwargs: pytest.fail("unexpected inference"))
+    commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "failed"
+    assert "batches" in scan["reasoning"]["error"]
 
 
 def test_invalid_revision_has_field_error_without_inference(review, monkeypatch):
@@ -161,6 +190,97 @@ def test_unexpected_failure_is_terminal_and_does_not_expose_details(review, monk
     assert scan["status"] == "failed"
     assert "unexpectedly" in scan["reasoning"]["error"]
     assert "private" not in scan["reasoning"]["error"]
+
+
+def test_batches_checkpoint_and_resume_without_repeating_completed_work(review, monkeypatch):
+    scan, diff, db = review
+    first = diff["batches"][0]
+    second = {**first, "patch": "different bounded patch", "files": [{"path": "second.py"}]}
+    diff["batches"] = [first, second]
+    diff["files"] = [*first["files"], *second["files"]]
+    calls = []
+
+    def infer(batch, **_):
+        calls.append(batch["patch"])
+        if len(calls) == 2:
+            raise SelfHostedConnectionError()
+        return {"findings": [{"summary": batch["files"][0]["path"]}]}
+
+    monkeypatch.setattr(commit_review, "review_diff", infer)
+    assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "failed"
+    checkpoint = scan["extras"]["diff_review"]
+    assert checkpoint["batches_completed"] == 1
+    assert checkpoint["batches_total"] == 2
+    assert checkpoint["findings"] == [{"summary": "example.py"}]
+    assert "bounded patch" not in repr(checkpoint)
+    assert "fixture-key" not in repr(checkpoint)
+
+    scan.update(status="running", last_resumed_at="attempt-two")
+    monkeypatch.setattr(
+        commit_review,
+        "review_diff",
+        lambda batch, **_: calls.append(batch["patch"]) or {"findings": [{"summary": "second.py"}]},
+    )
+    assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "completed"
+    assert calls == ["bounded patch", "different bounded patch", "different bounded patch"]
+    assert scan["extras"]["diff_review"]["findings"] == [
+        {"summary": "example.py"},
+        {"summary": "second.py"},
+    ]
+
+
+def test_changed_batch_partition_restarts_review(review, monkeypatch):
+    scan, diff, db = review
+    scan["extras"] = {
+        "diff_review": commit_review._checkpoint(
+            diff,
+            commit_review._batch_hashes(diff["batches"]),
+            {"base_url": "http://localhost:9000/v1", "model": "fixture-model"},
+            [{"summary": "old"}],
+            1,
+        )
+    }
+    diff["batches"][0]["patch"] = "changed source"
+    calls = []
+    monkeypatch.setattr(commit_review, "review_diff", lambda *_args, **_kwargs: calls.append(1) or {"findings": []})
+    commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert calls == [1]
+    assert scan["extras"]["diff_review"]["findings"] == []
+
+
+def test_cancellation_and_config_change_stop_before_next_batch(review, monkeypatch):
+    scan, diff, db = review
+    second = {**diff["batches"][0], "patch": "second patch", "files": [{"path": "second.py"}]}
+    diff["batches"].append(second)
+    diff["files"].extend(second["files"])
+    calls = []
+
+    def stop_after_first(batch, **_):
+        calls.append(batch["patch"])
+        scan["status"] = "stopped"
+        return {"findings": []}
+
+    monkeypatch.setattr(commit_review, "review_diff", stop_after_first)
+    assert not commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "stopped"
+    assert calls == ["bounded patch"]
+
+    scan.update(status="running", last_resumed_at="attempt-two", extras={})
+    settings = {"base_url": "http://localhost:9000/v1", "model": "fixture-model", "api_key": "fixture-key"}
+    monkeypatch.setattr(commit_review, "local_settings", lambda: dict(settings))
+
+    def change_after_first(batch, **_):
+        calls.append(batch["patch"])
+        settings["model"] = "different-model"
+        return {"findings": []}
+
+    monkeypatch.setattr(commit_review, "review_diff", change_after_first)
+    assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert scan["status"] == "failed"
+    assert calls == ["bounded patch", "bounded patch"]
+    assert scan["extras"]["diff_review"]["batches_completed"] == 1
 
 
 def test_outer_failure_cannot_fail_a_new_attempt(review):

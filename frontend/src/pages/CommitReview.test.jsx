@@ -104,4 +104,25 @@ describe('two-commit review', () => {
     expect(reviewed).toContain('No findings in the reviewed source');
     expect(reviewed).not.toContain('No model request was made');
   });
+
+  it('shows saved batch progress without claiming the whole review is finished', () => {
+    const review = {
+      files: [{ path: 'example.py' }],
+      findings: [],
+      batches_completed: 2,
+      batches_total: 8,
+    };
+    const partial = renderToStaticMarkup(createElement(SourceReviewFindings, { review }));
+    expect(partial).toContain('Reviewed 2 of 8 batches.');
+    expect(partial).toContain('Partial results.');
+    expect(partial).toContain('No findings in completed batches so far.');
+    expect(partial).not.toContain('No findings in the reviewed source.');
+
+    const completed = renderToStaticMarkup(
+      createElement(SourceReviewFindings, { review: { ...review, batches_completed: 8 } })
+    );
+    expect(completed).toContain('Reviewed 8 of 8 batches.');
+    expect(completed).not.toContain('Partial results.');
+    expect(completed).toContain('No findings in the reviewed source.');
+  });
 });

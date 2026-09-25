@@ -37,6 +37,36 @@ def _commit(repo, message):
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _changed_lines(ranges):
+    return [line for start, end in ranges for line in range(start, end + 1)]
+
+
+def _assert_batches_cover_changes(result, batch_bytes):
+    assert set(result) == {
+        "base_commit",
+        "head_commit",
+        "patch",
+        "files",
+        "unreviewed",
+        "no_changes",
+        "batches",
+    }
+    covered = {}
+    for batch in result["batches"]:
+        assert set(batch) == set(result) - {"batches"}
+        assert len(json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= batch_bytes
+        assert len({item["path"] for item in batch["files"]}) == len(batch["files"])
+        self_hosted._validate_diff(batch)
+        for item in batch["files"]:
+            for side in ("base", "head"):
+                key = (item["path"], side)
+                covered.setdefault(key, []).extend(_changed_lines(item[f"{side}_changed_lines"]))
+    for item in result["files"]:
+        for side in ("base", "head"):
+            key = (item["path"], side)
+            assert sorted(covered.get(key, [])) == _changed_lines(item[f"{side}_changed_lines"])
+
+
 def test_collects_edit_deletion_and_rename_from_committed_trees(tmp_path):
     repo = _repo(tmp_path / "repo")
     original = "".join(f"line {number}\n" for number in range(1, 25))
@@ -157,6 +187,117 @@ def test_identical_trees_are_explicit_and_abbreviations_resolve(tmp_path):
         "unreviewed": [],
         "no_changes": True,
     }
+
+    batched = collect_commit_diff(repo, base, head, batch_bytes=120_000)
+    assert batched == {**result, "batches": []}
+
+
+def test_batch_mode_keeps_default_diff_contract_for_small_change(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "code.py").write_text("before\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "code.py").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "edit")
+
+    ordinary = collect_commit_diff(repo, base, head)
+    batched = collect_commit_diff(repo, base, head, batch_bytes=120_000)
+
+    assert set(ordinary) == {"base_commit", "head_commit", "patch", "files", "unreviewed", "no_changes"}
+    assert {key: value for key, value in batched.items() if key != "batches"} == ordinary
+    assert len(batched["batches"]) == 1
+    _assert_batches_cover_changes(batched, 120_000)
+
+
+def test_batch_mode_packs_more_than_one_hundred_small_files(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    for number in range(161):
+        (repo / f"file-{number:03d}.txt").write_text(f"line {number}\n", encoding="utf-8")
+    head = _commit(repo, "many files")
+
+    with pytest.raises(CommitDiffError, match="file limit"):
+        collect_commit_diff(repo, base, head)
+    result = collect_commit_diff(repo, base, head, max_files=200, max_bytes=8 * 1024 * 1024, batch_bytes=6000)
+
+    assert len(result["files"]) == 161
+    assert len(result["batches"]) > 1
+    assert any(len(batch["files"]) > 1 for batch in result["batches"])
+    _assert_batches_cover_changes(result, 6000)
+
+
+def test_batch_mode_splits_large_addition_without_losing_lines(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "new.txt").write_text("".join(f"added {number:05d}\n" for number in range(18_000)), encoding="utf-8")
+    head = _commit(repo, "large addition")
+
+    result = collect_commit_diff(repo, base, head, max_bytes=8 * 1024 * 1024, batch_bytes=40_000)
+
+    assert len(result["batches"]) > 1
+    assert all(batch["files"][0]["path"] == "new.txt" for batch in result["batches"])
+    _assert_batches_cover_changes(result, 40_000)
+
+
+def test_batch_mode_splits_large_replacement_on_both_sides(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "code.txt").write_text("".join(f"old {number:05d}\n" for number in range(8000)), encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "code.txt").write_text("".join(f"new {number:05d}\n" for number in range(8000)), encoding="utf-8")
+    head = _commit(repo, "replace")
+
+    result = collect_commit_diff(repo, base, head, max_bytes=8 * 1024 * 1024, batch_bytes=30_000)
+
+    assert len(result["batches"]) > 1
+    _assert_batches_cover_changes(result, 30_000)
+    assert _changed_lines(result["files"][0]["base_changed_lines"]) == list(range(1, 8001))
+    assert _changed_lines(result["files"][0]["head_changed_lines"]) == list(range(1, 8001))
+
+
+def test_batch_mode_drops_oversized_context_but_keeps_changed_line(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    context = "c" * 130_000 + "\n"
+    (repo / "code.txt").write_text(context + "old\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "code.txt").write_text(context + "new\n", encoding="utf-8")
+    head = _commit(repo, "edit")
+
+    result = collect_commit_diff(repo, base, head, max_bytes=8 * 1024 * 1024, batch_bytes=120_000)
+
+    assert len(result["batches"]) == 1
+    assert "+new" in result["batches"][0]["patch"]
+    assert context not in result["batches"][0]["patch"]
+    _assert_batches_cover_changes(result, 120_000)
+
+
+def test_batch_mode_retains_rename_and_deletion_sides(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "old.txt").write_text("".join(f"keep {number}\n" for number in range(50)), encoding="utf-8")
+    (repo / "deleted.txt").write_text("".join(f"remove {number}\n" for number in range(200)), encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "old.txt").rename(repo / "new.txt")
+    (repo / "new.txt").write_text("".join(f"keep {number}\n" for number in range(49)) + "changed\n", encoding="utf-8")
+    (repo / "deleted.txt").unlink()
+    head = _commit(repo, "rename and delete")
+
+    result = collect_commit_diff(repo, base, head, max_bytes=8 * 1024 * 1024, batch_bytes=1100)
+
+    assert {item["status"] for item in result["files"]} == {"renamed", "deleted"}
+    assert len(result["batches"]) > 1
+    _assert_batches_cover_changes(result, 1100)
+    assert any(item["base_changed_lines"] for batch in result["batches"] for item in batch["files"])
+
+
+def test_batch_mode_rejects_one_line_that_cannot_fit(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "large.txt").write_text("x" * 130_000 + "\n", encoding="utf-8")
+    head = _commit(repo, "long line")
+
+    with pytest.raises(CommitDiffError, match="changed source line or its file metadata"):
+        collect_commit_diff(repo, base, head, max_bytes=8 * 1024 * 1024, batch_bytes=120_000)
 
 
 def test_unrelated_commits_compare_directly_and_reverse_cleanly(tmp_path):
@@ -454,6 +595,21 @@ def test_local_collector_uses_pinned_repository_and_git_directory_descriptors(tm
     assert result["files"][0]["path"] == "file.txt"
     assert "+selected head" in result["patch"]
     assert "decoy content" not in result["patch"]
+
+
+def test_local_collector_passes_batch_budget_through_pinned_directory(tmp_path):
+    root = tmp_path / "repositories"
+    root.mkdir()
+    repo = _repo(root / "selected")
+    (repo / "code.txt").write_text("before\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "code.txt").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "head")
+
+    result = commit_diff.collect_local_commit_diff(root, "selected", base, head, batch_bytes=120_000)
+
+    assert len(result["batches"]) == 1
+    _assert_batches_cover_changes(result, 120_000)
 
 
 def test_local_collector_rejects_repository_symlink_git_symlink_and_linked_worktree(tmp_path):

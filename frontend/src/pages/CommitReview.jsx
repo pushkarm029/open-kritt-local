@@ -289,8 +289,8 @@ export function CommitReviewResults({ scan, reload }) {
             </p>
           ))
         : scan.reasoning?.error && <p role="alert">{scan.reasoning.error}</p>}
-      {!review && ['pending', 'queued', 'running'].includes(scan.status) && (
-        <Spinner label="Waiting for review results" />
+      {['pending', 'queued', 'running'].includes(scan.status) && (
+        <Spinner label={review ? 'Review in progress' : 'Waiting for review results'} />
       )}
       {review && <SourceReviewFindings review={review} />}
     </div>
@@ -298,8 +298,20 @@ export function CommitReviewResults({ scan, reload }) {
 }
 
 export function SourceReviewFindings({ review }) {
+  const hasBatches = Number.isInteger(review.batches_total) && review.batches_total > 0;
+  const incomplete = hasBatches && review.batches_completed < review.batches_total;
   return (
     <>
+      {hasBatches && (
+        <div role="status" aria-live="polite">
+          <p>
+            Reviewed {review.batches_completed} of {review.batches_total} batches.
+          </p>
+          {incomplete && (
+            <p>Partial results. Retry continues from saved batches when the inputs and model settings match.</p>
+          )}
+        </div>
+      )}
       {review.no_changes && <p>The two commits have identical trees. No model request was needed.</p>}
       {review.unreviewed?.length > 0 && (
         <div role="note">
@@ -317,7 +329,9 @@ export function SourceReviewFindings({ review }) {
         <p>
           {review.files?.length === 0
             ? 'No source files could be reviewed. No model request was made.'
-            : 'No findings in the reviewed source. The changes may still contain defects.'}
+            : incomplete
+              ? 'No findings in completed batches so far.'
+              : 'No findings in the reviewed source. The changes may still contain defects.'}
         </p>
       )}
       {review.findings?.map((finding, index) => (
