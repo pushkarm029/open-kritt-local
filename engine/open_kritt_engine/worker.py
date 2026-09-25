@@ -20,6 +20,7 @@ from .artifact_cleanup import (
 )
 from .claude_auth import ClaudeCredentialRateLimited
 from .codex_updater import CodexCliGate, CodexUpdater
+from .commit_review import fail_commit_review, process_commit_review, process_connection_check
 from .config import EngineConfig
 from .db import QUOTA_RETRY_MAX_SECONDS, Database, now_utc
 from .generation import GenerationRunner, GenerationValidationError
@@ -878,6 +879,8 @@ class Worker:
         return self.run_scan_once(worker_id=worker_id)
 
     def run_generation_once(self) -> bool:
+        if process_connection_check():
+            return True
         if self.runtime_worker_count() <= 0:
             return False
         # Generation is intentionally a separate queue. A generation produces a
@@ -960,6 +963,9 @@ class Worker:
             except Exception as exc:
                 task_finished = True
                 LOGGER.exception("scan %s failed", scan["id"])
+                if scan.get("comparison_mode") == "commits":
+                    fail_commit_review(self.db, scan)
+                    return True
                 with self.db.connect() as conn:
                     self.db.set_scan_status_if_active(conn, int(scan["id"]), "failed", error=str(exc))
                     conn.commit()
@@ -1352,6 +1358,8 @@ class Worker:
             return False
 
     def process_scan(self, scan: dict[str, Any], worker_id: int = 1) -> bool:
+        if scan.get("comparison_mode") == "commits":
+            return process_commit_review(self.db, self.config, int(scan["id"]))
         scan_id = int(scan["id"])
         did_work = False
         with self.db.connect() as conn:

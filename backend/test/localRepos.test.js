@@ -8,7 +8,7 @@ import { test } from 'node:test';
 
 import express from 'express';
 
-import { countLocalRepoSnapshotFiles, localRepoStats } from '../src/lib/localRepos.js';
+import { countLocalRepoSnapshotFiles, listLocalRepos, localRepoStats } from '../src/lib/localRepos.js';
 import localReposRouter, { localRepoStatsErrorResponse } from '../src/routes/localRepos.js';
 
 async function temporaryDirectory(t) {
@@ -52,6 +52,36 @@ test('snapshot file counting includes hidden and symlink entries without followi
     complete: true,
     snapshotIssues: [],
   });
+});
+
+test('local repository metadata distinguishes real git directories from linked worktrees', async (t) => {
+  const root = await temporaryDirectory(t);
+  const outside = await temporaryDirectory(t);
+  const previousRoot = process.env.LOCAL_REPOS_PATH;
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.LOCAL_REPOS_PATH;
+    else process.env.LOCAL_REPOS_PATH = previousRoot;
+  });
+  process.env.LOCAL_REPOS_PATH = root;
+
+  await fs.mkdir(path.join(root, 'real-repo', '.git'), { recursive: true });
+  await fs.mkdir(path.join(outside, 'target-git'), { recursive: true });
+  await fs.mkdir(path.join(root, 'linked-worktree'));
+  await fs.writeFile(path.join(root, 'linked-worktree', '.git'), 'gitdir: /shared/main/.git/worktrees/linked\n');
+  await fs.mkdir(path.join(root, 'symlinked-git'));
+  await fs.symlink(path.join(outside, 'target-git'), path.join(root, 'symlinked-git', '.git'));
+  await fs.mkdir(path.join(root, 'plain-folder'));
+
+  const repositories = listLocalRepos();
+  assert.deepEqual(
+    repositories.map(({ name, isGit, supportsCommitReview }) => ({ name, isGit, supportsCommitReview })),
+    [
+      { name: 'linked-worktree', isGit: true, supportsCommitReview: false },
+      { name: 'plain-folder', isGit: false, supportsCommitReview: false },
+      { name: 'real-repo', isGit: true, supportsCommitReview: true },
+      { name: 'symlinked-git', isGit: true, supportsCommitReview: false },
+    ]
+  );
 });
 
 test('snapshot file counting stops after its traversal ceiling and returns a lower bound', async (t) => {

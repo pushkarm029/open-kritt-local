@@ -112,6 +112,14 @@ test('credential validation accepts only a single-line API key for managed provi
   assert.equal(validateProviderCredential('xai', 'one\ntwo').field, 'credential');
 });
 
+test('self-hosted credentials match the bounded adapter contract', () => {
+  assert.equal(validateProviderCredential('self_hosted', 'printable-key'), null);
+  assert.equal(validateProviderCredential('self_hosted', ' printable-key').field, 'credential');
+  assert.equal(validateProviderCredential('self_hosted', 'key with spaces').field, 'credential');
+  assert.equal(validateProviderCredential('self_hosted', 'é-key').field, 'credential');
+  assert.equal(validateProviderCredential('self_hosted', 'x'.repeat(8193)).field, 'credential');
+});
+
 test('provider status recognizes Codex and Claude login homes', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'open-kritt-provider-logins-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

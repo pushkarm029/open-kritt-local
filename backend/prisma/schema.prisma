@@ -149,6 +149,8 @@ model Scan {
   repoFull      String   @map("repo_full")
   repoKind      String?  @map("repo_kind") // remote | local
   commitSha     String   @map("commit_sha")
+  comparisonMode String  @default("full_repository") @map("comparison_mode")
+  baseCommitSha String?  @map("base_commit_sha")
   repoScope     String   @map("repo_scope")
   dependencies  String[] @map("dependencies") // legacy: addresses/names of each dependency
   dependenciesDetail Json? @map("dependencies_detail") // [{ kind, repo_full, commit_sha }]

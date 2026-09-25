@@ -88,7 +88,7 @@ function gitInfo(repoDir) {
   }
 }
 
-// Returns [{ name, path, isGit, branch, commit }] sorted by name.
+// Returns [{ name, path, isGit, supportsCommitReview, branch, commit }] sorted by name.
 export function listLocalRepos() {
   const root = localReposRoot();
   let entries;
@@ -101,9 +101,18 @@ export function listLocalRepos() {
     .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
     .map((e) => {
       const dir = path.join(root, e.name);
-      const isGit = fs.existsSync(path.join(dir, '.git'));
+      const gitPath = path.join(dir, '.git');
+      const isGit = fs.existsSync(gitPath);
+      let supportsCommitReview = false;
+      try {
+        // Linked worktrees use a .git file, and symlinked metadata would let a
+        // review follow history outside the selected repository root.
+        supportsCommitReview = fs.lstatSync(gitPath).isDirectory();
+      } catch {
+        // Keep repository listing best-effort when metadata disappears during a read.
+      }
       const { branch, commit } = isGit ? gitInfo(dir) : { branch: null, commit: null };
-      return { name: e.name, path: dir, isGit, branch, commit };
+      return { name: e.name, path: dir, isGit, supportsCommitReview, branch, commit };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }

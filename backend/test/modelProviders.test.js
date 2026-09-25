@@ -76,6 +76,15 @@ test('configured provider checks accept local raw credentials', () => {
   assert.equal(isModelProviderConfigured('deepseek', { env: { DEEPSEEK_API_KEY: 'local-key' } }), true);
 });
 
+test('self-hosted provider checks honor the account activity switch', () => {
+  const env = { SELF_HOSTED_API_KEY: 'local-key' };
+  const inactive = [{ provider: 'self_hosted', path: 'SELF_HOSTED_API_KEY', active: false }];
+  const active = [{ provider: 'self_hosted', path: 'SELF_HOSTED_API_KEY', active: true }];
+
+  assert.equal(isModelProviderConfigured('self_hosted', { env, accountActivity: inactive }), false);
+  assert.equal(isModelProviderConfigured('self_hosted', { env, accountActivity: active }), true);
+});
+
 test('model provider API exposes configured IDs and rejects unavailable scan providers', async (t) => {
   const previous = new Map(PROVIDER_ENV_KEYS.map((key) => [key, process.env[key]]));
   for (const key of PROVIDER_ENV_KEYS) delete process.env[key];

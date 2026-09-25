@@ -1,4 +1,5 @@
 import { MODEL_PROVIDERS } from './constants.js';
+import { accountIsActive, readAccountActivity } from './accountActivity.js';
 import { PROVIDER_CREDENTIALS_PATH, readManagedCredentialStateSync } from './providerCredentials.js';
 import { providerLoginIsConfigured } from './providerLogins.js';
 
@@ -41,5 +42,18 @@ export function configuredModelProviders({
 }
 
 export function isModelProviderConfigured(provider, options) {
+  if (provider === 'self_hosted') {
+    const env = options?.env || process.env;
+    const { credentials, disabledEnvironmentProviders } = readManagedCredentialStateSync(
+      options?.credentialsPath || PROVIDER_CREDENTIALS_PATH
+    );
+    const configured =
+      hasValue(credentials.self_hosted) ||
+      (!disabledEnvironmentProviders.includes('self_hosted') &&
+        (hasValue(env.SELF_HOSTED_API_KEY) || hasConfiguredFlag(env.OPEN_KRITT_SELF_HOSTED_API_KEY_CONFIGURED)));
+    if (!configured) return false;
+    const activity = options?.accountActivity || readAccountActivity(options?.accountActivityPath);
+    return accountIsActive('self_hosted', 'SELF_HOSTED_API_KEY', activity);
+  }
   return configuredModelProviders(options).includes(provider);
 }

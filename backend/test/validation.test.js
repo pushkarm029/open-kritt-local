@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   validateSeverityRanker,
   validateScan,
+  validateCommitDiffScan,
   validateWorkflow,
   validatePostScript,
   validateGeneration,
@@ -42,6 +43,42 @@ test('validateSeverityRanker requires name and content', () => {
   assert.equal(ok.name, 'baseline');
   assert.equal(ok.description, 'trim me');
   assert.equal(ok.content, '1. rule');
+});
+
+test('commit review validation accepts only pinned comparison fields', () => {
+  const valid = validateCommitDiffScan({
+    comparison_mode: 'commits',
+    repo_kind: 'remote',
+    repo_full: 'org/repo',
+    base_commit_sha: 'a'.repeat(40),
+    commit_sha: 'b'.repeat(40),
+  });
+  assert.deepEqual(valid, {
+    comparisonMode: 'commits',
+    repoKind: 'remote',
+    repoFull: 'org/repo',
+    baseCommitSha: 'a'.repeat(40),
+    commitSha: 'b'.repeat(40),
+  });
+
+  assert.throws(
+    () =>
+      validateCommitDiffScan({
+        comparison_mode: 'commits',
+        repo_kind: 'remote',
+        repo_full: 'org/repo',
+        base_commit_sha: 'a'.repeat(40),
+        commit_sha: 'b'.repeat(40),
+        model: 'ignored-model',
+        workflowId: '1',
+        dependencies: [],
+      }),
+    (error) =>
+      error instanceof ValidationError &&
+      ['model', 'workflowId', 'dependencies'].every((field) =>
+        error.errors.some((item) => item.field === field && item.message.includes('not supported'))
+      )
+  );
 });
 
 test('generation and scan model selections share normalization rules', () => {

@@ -45,9 +45,16 @@ export const PROVIDER_DEFINITIONS = {
     description: 'DeepSeek models through the Codex harness, with model discovery and API checks.',
     management: 'api_key',
   },
+  self_hosted: {
+    label: 'Self-hosted AI',
+    envKeys: ['SELF_HOSTED_API_KEY'],
+    credentialLabel: 'Self-hosted API key',
+    description: 'A private OpenAI-compatible model endpoint configured for commit reviews.',
+    management: 'api_key',
+  },
 };
 
-const MANAGED_CREDENTIAL_PROVIDERS = new Set(['openrouter', 'xai', 'deepseek']);
+const MANAGED_CREDENTIAL_PROVIDERS = new Set(['openrouter', 'xai', 'deepseek', 'self_hosted']);
 
 const MAX_CREDENTIAL_LENGTH = 16 * 1024;
 let writeQueue = Promise.resolve();
@@ -125,6 +132,15 @@ export function validateProviderCredential(provider, credential) {
   }
   if (typeof credential !== 'string' || !credential.trim()) {
     return { field: 'credential', message: 'Enter an API key.' };
+  }
+  if (provider === 'self_hosted') {
+    if (credential.length > 8192 || credential !== credential.trim() || !/^[\x21-\x7e]+$/.test(credential)) {
+      return {
+        field: 'credential',
+        message: 'The self-hosted API key must be printable ASCII without whitespace and under 8 KB.',
+      };
+    }
+    return null;
   }
   if (credential.length > MAX_CREDENTIAL_LENGTH || /[\r\n]/.test(credential)) {
     return { field: 'credential', message: 'The API key must be a single line under 16 KB.' };

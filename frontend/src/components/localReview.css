@@ -1,0 +1,35 @@
+.commit-review input,
+.commit-review select,
+.review-scope select,
+.self-hosted-card input:not([type='checkbox']) {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.review-scope select {
+  width: auto;
+  margin-left: 12px;
+}
+
+.commit-review input:focus-visible,
+.commit-review select:focus-visible,
+.review-scope select:focus-visible,
+.self-hosted-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.commit-review dd {
+  overflow-wrap: anywhere;
+  margin: 6px 0 16px;
+}
+
+.commit-review a {
+  color: var(--accent);
+}

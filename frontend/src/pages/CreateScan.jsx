@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { CommitReviewForm } from './CommitReview.jsx';
 import { api, ApiError } from '../api/client.js';
 import { usePageChrome } from '../context/ui.jsx';
 import { Spinner, ErrorState, Button } from '../components/ui.jsx';
@@ -62,7 +63,7 @@ export function scanLaunchChoiceRequired(error) {
   );
 }
 
-export default function CreateScan() {
+function FullRepositoryScan() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const duplicateFromId = params.get('from')?.trim() || '';
@@ -1777,5 +1778,51 @@ function Pills({ value, onChange, options, small, noMargin }) {
         );
       })}
     </div>
+  );
+}
+
+export default function CreateScan() {
+  const [params] = useSearchParams();
+  const from = params.get('from');
+  const [mode, setMode] = useState(params.get('workflow') ? 'full' : 'commits');
+  const [source, setSource] = useState(null);
+  const [loading, setLoading] = useState(Boolean(from));
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (!from) return;
+    let active = true;
+    api
+      .scan(from)
+      .then((scan) => {
+        if (!active) return;
+        setSource(scan);
+        setMode(scan.comparisonMode === 'commits' ? 'commits' : 'full');
+        setLoading(false);
+      })
+      .catch((next) => {
+        if (active) {
+          setError(next);
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [from]);
+  if (loading) return <Spinner label="Loading scan configuration" />;
+  if (error) return <ErrorState error={error} />;
+  return (
+    <>
+      <div className="review-scope" style={{ padding: '20px 32px 0' }}>
+        <label>
+          Review scope{' '}
+          <select value={mode} onChange={(event) => setMode(event.target.value)} disabled={Boolean(from)}>
+            <option value="commits">Two commits</option>
+            <option value="full">Full repository</option>
+          </select>
+        </label>
+      </div>
+      {mode === 'commits' ? <CommitReviewForm source={source} /> : <FullRepositoryScan />}
+    </>
   );
 }
