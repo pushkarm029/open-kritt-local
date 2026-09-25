@@ -314,7 +314,11 @@ export function SourceReviewFindings({ review }) {
         </div>
       )}
       {!review.no_changes && !review.findings?.length && (
-        <p>No findings in the reviewed source. This does not establish that the changes are free of defects.</p>
+        <p>
+          {review.files?.length === 0
+            ? 'No source files could be reviewed. No model request was made.'
+            : 'No findings in the reviewed source. The changes may still contain defects.'}
+        </p>
       )}
       {review.findings?.map((finding, index) => (
         <article

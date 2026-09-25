@@ -257,6 +257,18 @@ def test_connection_check_rejects_output_that_echoes_the_api_key():
     assert secret not in str(caught.value)
 
 
+@pytest.mark.parametrize("field", ["summary", "explanation", "remediation"])
+def test_review_rejects_credentials_in_decoded_finding_text(field):
+    secret = "test-only-credential"
+    response = _provider_response([{**_finding(), field: f"Response containing {secret}."}])
+    message = response["choices"][0]["message"]
+    message["content"] = message["content"].replace(secret, secret.replace("t", "\\u0074"))
+    with _mock_endpoint(response=response) as (base_url, _requests):
+        with pytest.raises(SelfHostedInvalidOutputError) as caught:
+            review_diff(_diff(), base_url=base_url, model="review-model", api_key=secret)
+    assert secret not in str(caught.value)
+
+
 def test_connection_check_rejects_a_different_model_in_the_provider_response():
     with _mock_endpoint(response=_provider_response(model="other-model")) as (base_url, _requests):
         with pytest.raises(SelfHostedInvalidOutputError):

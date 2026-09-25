@@ -1,10 +1,11 @@
 import hashlib
+import json
 import os
 import subprocess
 
 import pytest
 
-from open_kritt_engine import commit_diff
+from open_kritt_engine import commit_diff, self_hosted
 from open_kritt_engine.commit_diff import CommitDiffError, collect_commit_diff
 
 
@@ -61,7 +62,7 @@ def test_collects_edit_deletion_and_rename_from_committed_trees(tmp_path):
     assert result["base_commit"] == base
     assert result["head_commit"] == head
     assert result["no_changes"] is False
-    assert result["unreviewed"] == []
+    assert result["unreviewed"] == [{"path": "new-name.txt", "reason": "rename has no changed source lines"}]
     entries = {entry["path"]: entry for entry in result["files"]}
     assert entries["edit.txt"] == {
         "path": "edit.txt",
@@ -76,14 +77,68 @@ def test_collects_edit_deletion_and_rename_from_committed_trees(tmp_path):
     assert entries["gone.txt"]["status"] == "deleted"
     assert entries["gone.txt"]["base_changed_lines"] == [[1, 1]]
     assert entries["gone.txt"]["head_changed_lines"] == []
-    assert entries["new-name.txt"]["status"] == "renamed"
-    assert entries["new-name.txt"]["base_path"] == "old-name.txt"
-    assert entries["new-name.txt"]["head_path"] == "new-name.txt"
+    assert "new-name.txt" not in entries
     assert "+updated line 12" in result["patch"]
     assert "working tree only" not in result["patch"]
     assert "staged only" not in result["patch"]
     assert (repo / ".git" / "index").read_bytes() == index_before
     assert _git(repo, "status", "--porcelain") == status_before
+
+
+def test_metadata_only_rename_and_mode_change_are_explicitly_unreviewed(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "repo")
+    (repo / "old.txt").write_text("unchanged\n", encoding="utf-8")
+    (repo / "mode.txt").write_text("same lines\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "old.txt").rename(repo / "new.txt")
+    (repo / "mode.txt").chmod(0o755)
+    head = _commit(repo, "metadata only")
+
+    result = collect_commit_diff(repo, base, head)
+
+    assert result["no_changes"] is False
+    assert result["files"] == []
+    assert result["patch"] == ""
+    assert {item["path"]: item["reason"] for item in result["unreviewed"]} == {
+        "mode.txt": "change has no source lines to review",
+        "new.txt": "rename has no changed source lines",
+    }
+    monkeypatch.setattr(self_hosted, "_post_chat_completion", lambda **_kwargs: pytest.fail("unexpected inference"))
+    assert self_hosted.review_diff(result, base_url="https://unused.example/v1", model="m", api_key="k") == {
+        "findings": []
+    }
+
+
+def test_metadata_only_large_rename_does_not_read_source_blob(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "old.txt").write_text("source\n" * 180_000, encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "old.txt").rename(repo / "new.txt")
+    head = _commit(repo, "rename")
+
+    result = collect_commit_diff(repo, base, head)
+
+    assert result["files"] == []
+    assert result["unreviewed"] == [{"path": "new.txt", "reason": "rename has no changed source lines"}]
+
+
+def test_rename_with_changed_source_remains_reviewable(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    original = "".join(f"line {number}\n" for number in range(30))
+    (repo / "old.txt").write_text(original, encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "old.txt").rename(repo / "new.txt")
+    (repo / "new.txt").write_text(original.replace("line 15\n", "changed line 15\n"), encoding="utf-8")
+    head = _commit(repo, "rename and edit")
+
+    result = collect_commit_diff(repo, base, head)
+
+    assert result["unreviewed"] == []
+    assert result["files"][0]["status"] == "renamed"
+    assert result["files"][0]["base_path"] == "old.txt"
+    assert result["files"][0]["head_path"] == "new.txt"
+    assert result["files"][0]["head_changed_lines"] == [[16, 16]]
+    assert "+changed line 15" in result["patch"]
 
 
 def test_identical_trees_are_explicit_and_abbreviations_resolve(tmp_path):
@@ -252,6 +307,21 @@ def test_binary_symlink_and_submodule_changes_are_unreviewed(tmp_path):
     }
 
 
+def test_large_binary_is_skipped_without_blocking_small_text_edit(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "code.py").write_text("safe = True\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "code.py").write_text("safe = False\n", encoding="utf-8")
+    (repo / "image.bin").write_bytes(b"\0" + b"x" * (1024 * 1024 + 1))
+    head = _commit(repo, "text and binary")
+
+    result = collect_commit_diff(repo, base, head)
+
+    assert [item["path"] for item in result["files"]] == ["code.py"]
+    assert result["unreviewed"] == [{"path": "image.bin", "reason": "binary content is unsupported"}]
+    assert "+safe = False" in result["patch"]
+
+
 def test_invalid_utf8_text_and_path_are_reported_without_lossy_review(tmp_path):
     repo = _repo(tmp_path / "repo")
     (repo / "text.txt").write_bytes(b"valid\n")
@@ -292,6 +362,59 @@ def test_file_and_byte_limits_fail_whole_comparison(tmp_path):
         collect_commit_diff(repo, base, head, max_files=1)
     with pytest.raises(CommitDiffError, match="byte limit"):
         collect_commit_diff(repo, base, head, max_bytes=4)
+
+
+def test_small_patch_in_large_text_file_uses_review_input_limit(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    lines = [f"line {number:05d}\n" for number in range(8000)]
+    (repo / "code.txt").write_text("".join(lines), encoding="utf-8")
+    base = _commit(repo, "base")
+    lines[4000] = "changed line 04000\n"
+    (repo / "code.txt").write_text("".join(lines), encoding="utf-8")
+    head = _commit(repo, "one line")
+
+    result = collect_commit_diff(repo, base, head)
+
+    assert len(result["patch"].encode("utf-8")) < 1000
+    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) < 120_000
+    assert result["files"][0]["head_changed_lines"] == [[4001, 4001]]
+
+
+def test_source_object_processing_limit_is_separate_from_review_input(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "large.txt").write_text("a" * (1024 * 1024 + 1), encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "large.txt").write_text("a" * (1024 * 1024) + "b", encoding="utf-8")
+    head = _commit(repo, "edit")
+
+    with pytest.raises(CommitDiffError, match="1 MiB processing limit"):
+        collect_commit_diff(repo, base, head)
+
+
+def test_total_source_processing_limit_is_bounded_across_files(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    for number in range(9):
+        (repo / f"file-{number}.txt").write_text(str(number) * 480_000, encoding="utf-8")
+    base = _commit(repo, "base")
+    for number in range(9):
+        (repo / f"file-{number}.txt").write_text(str(number) * 479_999 + "x", encoding="utf-8")
+    head = _commit(repo, "edit")
+
+    with pytest.raises(CommitDiffError, match="8 MiB source processing limit"):
+        collect_commit_diff(repo, base, head)
+
+
+def test_serialized_review_input_includes_metadata_in_byte_limit(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "initial.txt").write_text("initial\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "new.txt").write_text("source\n", encoding="utf-8")
+    head = _commit(repo, "add")
+    result = collect_commit_diff(repo, base, head)
+    patch_bytes = len(result["patch"].encode("utf-8"))
+
+    with pytest.raises(CommitDiffError, match="review input byte limit"):
+        collect_commit_diff(repo, base, head, max_bytes=patch_bytes + 1)
 
 
 def test_local_collector_uses_pinned_repository_and_git_directory_descriptors(tmp_path, monkeypatch):

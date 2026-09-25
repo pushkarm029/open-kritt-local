@@ -29,6 +29,10 @@ _FULL_COMMIT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _ZERO_OBJECT_ID_RE = re.compile(r"^0+$")
 _MAX_BYTES_LIMIT = 8 * 1024 * 1024
 _MAX_FILES_LIMIT = 1000
+_MAX_REVIEW_INPUT_BYTES = 120_000
+_BINARY_PROBE_BYTES = 8192
+_MAX_SOURCE_BLOB_BYTES = 1024 * 1024
+_MAX_SOURCE_PROCESSING_BYTES = 8 * 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 10.0
 _TOTAL_TIMEOUT_SECONDS = 30.0
 _STDERR_LIMIT = 4096
@@ -78,6 +82,7 @@ def _run_git(
     stdout_limit: int,
     deadline: float,
     location: _GitLocation | None = None,
+    prefix_only: bool = False,
 ) -> bytes:
     git = shutil.which("git")
     if not git:
@@ -153,7 +158,8 @@ def _run_git(
                 raise CommitDiffError("Git comparison exceeded its time limit")
             for key, _ in selector.select(min(remaining, 0.2)):
                 fd = key.data
-                chunk = os.read(fd, min(65536, limits[fd] - len(buffers[fd]) + 1))
+                extra_byte = 0 if prefix_only and fd == stdout_fd else 1
+                chunk = os.read(fd, min(65536, limits[fd] - len(buffers[fd]) + extra_byte))
                 if not chunk:
                     selector.unregister(key.fileobj)
                     key.fileobj.close()
@@ -161,6 +167,8 @@ def _run_git(
                 buffers[fd].extend(chunk)
                 if len(buffers[fd]) > limits[fd]:
                     raise CommitDiffError("Git comparison output exceeds its configured limit")
+                if prefix_only and fd == stdout_fd and len(buffers[fd]) == limits[fd]:
+                    return bytes(buffers[fd])
 
         remaining = min(timeout, deadline - time.monotonic())
         if remaining <= 0:
@@ -356,6 +364,25 @@ def _read_blob(
     if len(content) != expected_size:
         raise CommitDiffError("Git returned an incomplete source object")
     return content
+
+
+def _probe_blob(
+    repo_dir: str | os.PathLike[str],
+    object_id: str,
+    size: int,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> bytes:
+    if size <= _BINARY_PROBE_BYTES:
+        return _read_blob(repo_dir, object_id, size, deadline, location)
+    return _run_git(
+        repo_dir,
+        ["cat-file", "blob", object_id],
+        stdout_limit=_BINARY_PROBE_BYTES,
+        deadline=deadline,
+        location=location,
+        prefix_only=True,
+    )
 
 
 def _source_lines(text: str) -> list[str]:
@@ -561,28 +588,64 @@ def _collect_commit_diff(
         if reason:
             path = change.new_path or change.old_path
             unreviewed.append({"path": _display_path(path), "reason": reason})
+        elif change.old_object == change.new_object:
+            status = _status_name(change)
+            reason = (
+                "rename has no changed source lines" if status == "renamed" else "change has no source lines to review"
+            )
+            unreviewed.append({"path": _display_path(change.new_path or change.old_path), "reason": reason})
         else:
             candidates.append(change)
 
     sizes: dict[str, int] = {}
-    source_bytes = 0
     for change in candidates:
         for object_id in (change.old_object, change.new_object):
             if _ZERO_OBJECT_ID_RE.fullmatch(object_id):
                 continue
             if object_id not in sizes:
                 sizes[object_id] = _object_size(repo_dir, object_id, deadline, location)
-            source_bytes += sizes[object_id]
-            if source_bytes > max_bytes:
-                raise CommitDiffError("comparison exceeds the configured source byte limit")
 
     blobs: dict[str, bytes] = {}
+    binary_objects: set[str] = set()
+    processed_bytes = 0
     for object_id, size in sizes.items():
+        if processed_bytes + min(size, _BINARY_PROBE_BYTES) > _MAX_SOURCE_PROCESSING_BYTES:
+            raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+        probe = _probe_blob(repo_dir, object_id, size, deadline, location)
+        processed_bytes += len(probe)
+        if b"\0" in probe:
+            binary_objects.add(object_id)
+        elif size <= _BINARY_PROBE_BYTES:
+            blobs[object_id] = probe
+
+    reviewable = [
+        change
+        for change in candidates
+        if change.old_object not in binary_objects and change.new_object not in binary_objects
+    ]
+    reviewable_objects = {
+        object_id
+        for change in reviewable
+        for object_id in (change.old_object, change.new_object)
+        if object_id in sizes and object_id not in blobs
+    }
+    for object_id in reviewable_objects:
+        size = sizes[object_id]
+        if size > _MAX_SOURCE_BLOB_BYTES:
+            raise CommitDiffError("source object exceeds the 1 MiB processing limit")
+        if processed_bytes + size > _MAX_SOURCE_PROCESSING_BYTES:
+            raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
         blobs[object_id] = _read_blob(repo_dir, object_id, size, deadline, location)
+        processed_bytes += size
 
     files: list[dict] = []
     patch_parts: list[str] = []
     for change in candidates:
+        if change.old_object in binary_objects or change.new_object in binary_objects:
+            unreviewed.append(
+                {"path": _display_path(change.new_path or change.old_path), "reason": "binary content is unsupported"}
+            )
+            continue
         old_bytes = b"" if _ZERO_OBJECT_ID_RE.fullmatch(change.old_object) else blobs[change.old_object]
         new_bytes = b"" if _ZERO_OBJECT_ID_RE.fullmatch(change.new_object) else blobs[change.new_object]
         if b"\0" in old_bytes or b"\0" in new_bytes:
@@ -603,6 +666,9 @@ def _collect_commit_diff(
         new_path = _display_path(change.new_path) if change.new_path else None
         status = _status_name(change)
         assert status is not None
+        if old_text == new_text:
+            unreviewed.append({"path": new_path or old_path, "reason": "change has no source lines to review"})
+            continue
         old_lines = _source_lines(old_text)
         new_lines = _source_lines(new_text)
         matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
@@ -623,9 +689,10 @@ def _collect_commit_diff(
         )
 
     patch = "".join(patch_parts)
-    if len(patch.encode("utf-8")) > max_bytes:
+    input_limit = min(max_bytes, _MAX_REVIEW_INPUT_BYTES)
+    if len(patch.encode("utf-8")) > input_limit:
         raise CommitDiffError("comparison exceeds the configured patch byte limit")
-    return {
+    result = {
         "base_commit": base,
         "head_commit": head,
         "patch": patch,
@@ -633,3 +700,7 @@ def _collect_commit_diff(
         "unreviewed": unreviewed,
         "no_changes": False,
     }
+    serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(serialized) > input_limit:
+        raise CommitDiffError("comparison exceeds the configured review input byte limit")
+    return result

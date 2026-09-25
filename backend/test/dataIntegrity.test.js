@@ -18,6 +18,7 @@ import {
   lockScanConfigurationResources,
   patchScanIfPresent,
   requiredScanExtraKeys,
+  scanComparisonMode,
   scanLaunchDecision,
   validateScanRuntimeUpdate,
   validateSupplementalPostScriptRequest,
@@ -37,6 +38,22 @@ test('scan launch choices map immediate work to pending and queued work to queue
     () => scanLaunchDecision({ launchPolicy: 'later' }, 1),
     (error) => error instanceof ValidationError && error.errors[0]?.field === 'launchPolicy'
   );
+});
+
+test('explicit comparison modes cannot fall through to a different scan flow', () => {
+  assert.equal(scanComparisonMode({}), 'full_repository');
+  assert.equal(scanComparisonMode({ comparison_mode: 'full_repository' }), 'full_repository');
+  assert.equal(scanComparisonMode({ comparisonMode: 'commits' }), 'commits');
+  for (const body of [
+    { comparison_mode: 'commit' },
+    { comparisonMode: null },
+    { comparison_mode: 'full_repository', comparisonMode: 'commits' },
+  ]) {
+    assert.throws(
+      () => scanComparisonMode(body),
+      (error) => error instanceof ValidationError && error.errors[0]?.field === 'comparison_mode'
+    );
+  }
 });
 
 test('referenced workflows cannot be rewritten or have their steps deleted', async () => {

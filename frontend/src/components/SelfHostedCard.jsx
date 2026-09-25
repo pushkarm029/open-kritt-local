@@ -168,7 +168,7 @@ export default function SelfHostedCard({ provider, onToggleActive, updatingActiv
       <div role="status" aria-live="polite">
         {saved && <p>Configuration saved.</p>}
         {check?.status === 'pending' && <p>Checking from the engine...</p>}
-        {check?.status === 'passed' && <p>Connection and structured output verified.</p>}
+        {check?.status === 'passed' && <p>Connection and response format verified.</p>}
         {check?.status === 'failed' && <p>{check.error || 'Connection check failed.'}</p>}
       </div>
     </section>

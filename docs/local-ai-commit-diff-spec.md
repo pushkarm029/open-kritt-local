@@ -12,18 +12,25 @@ saved scan settings. This document authorizes no deployment or live model calls.
 ## Use
 
 In Accounts, save the Self-hosted AI base URL, exact model ID, and API key. Keep
-its account active. Test saved connection checks the endpoint from the engine
-with a fixed prompt and validates its structured response.
+its account active. Test saved connection sends a fixed prompt from the engine
+and checks that the model returns the required response format.
 
 New Scan opens in Two commits mode. Select a repository, enter Base commit and
 Head commit IDs, then start the review. The engine resolves abbreviated IDs before
-inference. Results show both full IDs, source findings, and skipped changes.
+calling the model. Results show both full IDs, source findings, and skipped changes.
 Export review downloads JSON. Full repository remains available in Review scope.
 
 Local input requires a main Git repository with a `.git` directory. Linked
 worktrees are excluded. Comparisons are bounded to 100 changed files and 120,000
 bytes of review input; oversized input fails with an error. This version uses a
 single model request and does not split large comparisons into multiple reviews.
+If all changed files are unsupported, results state that no source was reviewed
+and no model request was made.
+
+Text processing has separate limits: 1 MiB per file revision and 8 MiB of source
+reads per comparison. The review input limit covers the patch and its metadata.
+Large files are checked for binary content using their first 8 KiB.
+Files that still exceed the processing limits fail the comparison.
 
 ![Two-commit review in the existing UI](images/local-commit-review.png)
 
@@ -99,9 +106,11 @@ to obtain both objects. Do not execute repository hooks or external diff helpers
 
 Include text additions, modifications, deletions, and renames. Preserve base-side
 locations for deleted code and head-side locations for new code. Record binary,
-submodule, or other unsupported changes as unreviewed. If context exceeds the
-adapter's configured bound, report that limit rather than silently truncating or
-claiming complete coverage. Treat repository content as untrusted data.
+submodule, or other unsupported changes as unreviewed. Renames without text
+changes and file-mode changes have no source lines to review and are listed as
+unreviewed. If context exceeds the adapter's configured bound, report that limit
+rather than silently truncating or claiming complete coverage. Treat repository
+content as untrusted data.
 
 ## Review and results
 

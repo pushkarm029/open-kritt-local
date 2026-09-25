@@ -80,4 +80,28 @@ describe('two-commit review', () => {
     expect(html).toContain('Delete');
     expect(html).toContain('identical trees');
   });
+
+  it('distinguishes skipped source from a review with no findings', () => {
+    const skipped = renderToStaticMarkup(
+      createElement(SourceReviewFindings, {
+        review: {
+          no_changes: false,
+          files: [],
+          findings: [],
+          unreviewed: [{ path: 'asset.bin', reason: 'Binary file' }],
+        },
+      })
+    );
+    expect(skipped).toContain('No source files could be reviewed. No model request was made.');
+    expect(skipped).toContain('asset.bin');
+    expect(skipped).not.toContain('No findings in the reviewed source');
+
+    const reviewed = renderToStaticMarkup(
+      createElement(SourceReviewFindings, {
+        review: { no_changes: false, files: [{ path: 'example.py' }], findings: [], unreviewed: [] },
+      })
+    );
+    expect(reviewed).toContain('No findings in the reviewed source');
+    expect(reviewed).not.toContain('No model request was made');
+  });
 });

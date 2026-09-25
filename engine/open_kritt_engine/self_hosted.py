@@ -437,7 +437,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _parse_findings(content: str, files_by_path: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _parse_findings(content: str, files_by_path: dict[str, dict[str, Any]], *, api_key: str) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(content, object_pairs_hook=_reject_duplicate_keys)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -451,6 +451,8 @@ def _parse_findings(content: str, files_by_path: dict[str, dict[str, Any]]) -> l
     validated: list[dict[str, Any]] = []
     for finding in findings:
         if not isinstance(finding, dict) or set(finding) != _FINDING_KEYS:
+            raise SelfHostedInvalidOutputError()
+        if any(isinstance(value, str) and api_key in value for value in finding.values()):
             raise SelfHostedInvalidOutputError()
         for key, maximum in _MAX_FINDING_STRING_LENGTHS.items():
             value = finding[key]
@@ -528,7 +530,7 @@ def review_diff(
         ],
         timeout_seconds=timeout_seconds,
     )
-    return {"findings": _parse_findings(content, files_by_path)}
+    return {"findings": _parse_findings(content, files_by_path, api_key=api_key.strip())}
 
 
 def check_connection(*, base_url: str, model: str, api_key: str, timeout_seconds: float = 60) -> dict[str, Any]:
@@ -544,7 +546,7 @@ def check_connection(*, base_url: str, model: str, api_key: str, timeout_seconds
         ],
         timeout_seconds=timeout_seconds,
     )
-    findings = _parse_findings(content, {})
+    findings = _parse_findings(content, {}, api_key=api_key.strip())
     if findings:
         raise SelfHostedInvalidOutputError()
     return {"success": True, "model": model}

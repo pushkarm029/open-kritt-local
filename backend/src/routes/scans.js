@@ -15,7 +15,7 @@ import {
 import { assembleScans, assembleScan } from '../lib/repo.js';
 import { repoDisplayName, serializeSupplementalPostScriptRun, serializeVulnerability } from '../lib/serialize.js';
 import { SCAN_STATUSES, extractExtraKeys } from '../lib/constants.js';
-import { localRepoNames } from '../lib/localRepos.js';
+import { localCommitReviewNames, localRepoNames } from '../lib/localRepos.js';
 import { assertModelSelectionAvailable } from '../lib/modelSelection.js';
 import { isModelProviderConfigured } from '../lib/modelProviders.js';
 import { readSelfHostedConfig } from '../lib/selfHostedConfig.js';
@@ -110,7 +110,22 @@ export function scanLaunchDecision(body, activeScanCount) {
   return { kind: 'ready', status: launchPolicy === 'queue' ? 'queued' : 'pending' };
 }
 
-export async function createCommitDiffScan(reqBody = {}, { localNames = localRepoNames(), db = prisma } = {}) {
+export function scanComparisonMode(body = {}) {
+  const snake = body?.comparison_mode;
+  const camel = body?.comparisonMode;
+  const mode = snake === undefined ? camel : snake;
+  if (
+    (snake !== undefined && camel !== undefined && snake !== camel) ||
+    (mode !== undefined && mode !== 'full_repository' && mode !== 'commits')
+  ) {
+    throw new ValidationError([
+      { field: 'comparison_mode', message: 'Comparison mode must be "full_repository" or "commits".' },
+    ]);
+  }
+  return mode ?? 'full_repository';
+}
+
+export async function createCommitDiffScan(reqBody = {}, { localNames = localCommitReviewNames(), db = prisma } = {}) {
   const valid = validateCommitDiffScan(reqBody, { localNames });
   const selfHosted = await readSelfHostedConfig();
   if (!selfHosted.baseUrl || !selfHosted.model) {
@@ -171,7 +186,7 @@ export async function createCommitDiffScan(reqBody = {}, { localNames = localRep
 
 async function createCommitDiffScanResponse(req, res, next) {
   try {
-    const created = await createCommitDiffScan(req.body, { localNames: localRepoNames() });
+    const created = await createCommitDiffScan(req.body);
     res.status(201).json(await assembleScan(created));
   } catch (error) {
     if (error?.status === 409 && error.code === 'scan_launch_policy_required') {
@@ -1096,7 +1111,7 @@ router.get('/:id/export', async (req, res, next) => {
 // POST /api/scans — create a scan now or place it behind active scans.
 router.post('/', async (req, res, next) => {
   try {
-    if (req.body?.comparison_mode === 'commits' || req.body?.comparisonMode === 'commits') {
+    if (scanComparisonMode(req.body) === 'commits') {
       return await createCommitDiffScanResponse(req, res, next);
     }
     const valid = validateScan(req.body, { localNames: localRepoNames() });

@@ -121,6 +121,14 @@ export function localRepoNames() {
   return new Set(listLocalRepos().map((r) => r.name));
 }
 
+export function localCommitReviewNames() {
+  return new Set(
+    listLocalRepos()
+      .filter((repo) => repo.supportsCommitReview)
+      .map((repo) => repo.name)
+  );
+}
+
 // Count the file-like entries that a local scan snapshot would inspect. This
 // deliberately does not use Git metadata or .gitignore: local snapshots include
 // ignored and untracked files. Symlinks count as one entry and are never followed.

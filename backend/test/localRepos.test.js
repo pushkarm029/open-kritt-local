@@ -8,7 +8,12 @@ import { test } from 'node:test';
 
 import express from 'express';
 
-import { countLocalRepoSnapshotFiles, listLocalRepos, localRepoStats } from '../src/lib/localRepos.js';
+import {
+  countLocalRepoSnapshotFiles,
+  listLocalRepos,
+  localCommitReviewNames,
+  localRepoStats,
+} from '../src/lib/localRepos.js';
 import localReposRouter, { localRepoStatsErrorResponse } from '../src/routes/localRepos.js';
 
 async function temporaryDirectory(t) {
@@ -82,6 +87,7 @@ test('local repository metadata distinguishes real git directories from linked w
       { name: 'symlinked-git', isGit: true, supportsCommitReview: false },
     ]
   );
+  assert.deepEqual([...localCommitReviewNames()], ['real-repo']);
 });
 
 test('snapshot file counting stops after its traversal ceiling and returns a lower bound', async (t) => {

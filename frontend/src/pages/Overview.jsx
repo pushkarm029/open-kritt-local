@@ -63,7 +63,7 @@ export default function Overview() {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 500, fontSize: 13.5 }}>{s.repoDisplay || s.repoFull}</div>
                   <div className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 2 }}>
-                    {s.workflowName} · {s.model}
+                    {s.comparisonMode === 'commits' ? 'Two-commit review' : s.workflowName} · {s.model}
                     {Object.keys(s.modelOverrides || {}).length
                       ? ` · ${Object.keys(s.modelOverrides).length} depth overrides`
                       : ''}
