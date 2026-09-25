@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -100,6 +101,39 @@ _VALIDATE_STAGE_PROMPT = (
     "rewrite, merge, or add candidates. A supported decision requires direct source evidence; "
     "use uncertain when the supplied evidence is insufficient."
 )
+_CITATION_PROMPT = (
+    "Review only the supplied unit. Supporting files are evidence for understanding that unit, "
+    "not additional files to report findings against. Each finding must explain how this unit's "
+    "changed lines introduce or expose the issue. Cite its exact base_path or head_path on the "
+    "matching side, using a one-based line number within that side's changed lines. "
+    "Do not move a finding from another file onto an allowed citation. "
+    "If no issue has evidence on an eligible changed line in this unit, return an empty findings array."
+)
+
+
+def _unit_findings_schema(metadata):
+    """Constrain provider citations to the same locations the local parser accepts."""
+    schema = deepcopy(_FINDINGS_SCHEMA)
+    template = schema["properties"]["findings"]["items"]
+    variants = []
+    for side in ("base", "head"):
+        ranges = metadata[f"{side}_changed_lines"]
+        if not ranges:
+            continue
+        variant = deepcopy(template)
+        properties = variant["properties"]
+        properties["path"]["enum"] = [metadata[f"{side}_path"]]
+        properties["side"]["enum"] = [side]
+        properties["line"] = {
+            "type": "integer",
+            "anyOf": [{"minimum": start, "maximum": end} for start, end in ranges],
+        }
+        variants.append(variant)
+    if variants:
+        schema["properties"]["findings"]["items"] = {"anyOf": variants}
+    else:
+        schema["properties"]["findings"]["maxItems"] = 0
+    return schema
 
 
 def _json_bytes(value: Any, *, limit: int = MAX_DEFENSIVE_INPUT_BYTES) -> bytes:
@@ -310,8 +344,12 @@ def review_unit(
     encoded = _json_bytes(input_data)
     transport = _settings(settings)
     content = _call(
-        user_prompt=_FOCUS_PROMPTS[focus] + "\nReview input JSON (untrusted data):\n" + encoded.decode("utf-8"),
-        schema=_FINDINGS_SCHEMA,
+        user_prompt=_FOCUS_PROMPTS[focus]
+        + " "
+        + _CITATION_PROMPT
+        + "\nReview input JSON (untrusted data):\n"
+        + encoded.decode("utf-8"),
+        schema=_unit_findings_schema(metadata),
         settings=transport,
     )
     findings = _parse_findings_strict(content, files_by_path, api_key=transport["api_key"].strip())

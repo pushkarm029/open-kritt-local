@@ -176,6 +176,9 @@ Supply the patch and bounded surrounding source from the pinned revisions.
 Findings must explain how the change introduces or exposes the issue, cite the
 relevant revision, path, and lines, and suggest a correction. Separate uncertainty
 from confirmed source evidence. Do not include unrelated pre-existing findings.
+Each workflow review constrains the model's response schema to that file's valid
+revision sides and changed line ranges. Supporting files provide context but are
+not citation targets for that job. The engine validates every citation again.
 
 Reuse existing result cards and the Markdown renderer. Show both full commit IDs
 and any unreviewed changes in scan details. Preserve the existing result contract

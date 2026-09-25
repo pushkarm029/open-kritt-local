@@ -271,6 +271,22 @@ def test_invalid_provider_envelopes_and_model_content_use_safe_invalid_output_er
             check_connection(base_url=base_url, model="m", api_key="key")
 
 
+def test_truncated_response_has_specific_safe_error():
+    with _mock_endpoint(response=_provider_response(finish_reason="length")) as (base_url, _):
+        with pytest.raises(SelfHostedInvalidOutputError, match="output limit"):
+            check_connection(base_url=base_url, model="review-model", api_key="key")
+
+
+@pytest.mark.parametrize(
+    ("finding", "message"),
+    [(_finding(path="other.py"), "file outside"), (_finding(line=1), "line outside")],
+)
+def test_rejected_citation_identifies_the_contract_failure(finding, message):
+    with _mock_endpoint(response=_provider_response([finding])) as (base_url, _):
+        with pytest.raises(SelfHostedInvalidOutputError, match=message):
+            review_diff(_diff(), base_url=base_url, model="review-model", api_key="key")
+
+
 def test_response_size_limit_is_enforced():
     oversized = b" " * (1024 * 1024 + 1)
     with _mock_endpoint(raw_body=oversized) as (base_url, _requests):

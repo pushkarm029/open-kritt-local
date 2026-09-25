@@ -455,6 +455,8 @@ def _post_chat_completion(
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError
         choice = choices[0]
+        if choice.get("finish_reason") == "length":
+            raise SelfHostedInvalidOutputError("The self-hosted model reached its output limit before finishing.")
         if choice.get("finish_reason") != "stop":
             raise ValueError
         message = choice["message"]
@@ -514,12 +516,12 @@ def _parse_findings(content: str, files_by_path: dict[str, dict[str, Any]], *, a
             None,
         )
         if matched_file is None:
-            raise SelfHostedInvalidOutputError()
+            raise SelfHostedInvalidOutputError("The self-hosted model cited a file outside the current review scope.")
         side_metadata = matched_file[finding["side"]]
         if line > side_metadata["line_count"] or not any(
             start <= line <= end for start, end in side_metadata["changed_lines"]
         ):
-            raise SelfHostedInvalidOutputError()
+            raise SelfHostedInvalidOutputError("The self-hosted model cited a line outside the reviewed changes.")
         validated.append(
             {
                 "summary": finding["summary"].strip(),
