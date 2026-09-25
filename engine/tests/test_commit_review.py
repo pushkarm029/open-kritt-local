@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from copy import deepcopy
 from types import SimpleNamespace
@@ -289,3 +290,38 @@ def test_outer_failure_cannot_fail_a_new_attempt(review):
     scan["last_resumed_at"] = "attempt-two"
     commit_review.fail_commit_review(db, old_attempt)
     assert scan["status"] == "running"
+
+
+@pytest.mark.parametrize("budget", ["", "1024", "0", "4097", "abc", "1.5"])
+def test_local_thinking_budget_configuration(tmp_path, monkeypatch, budget):
+    (tmp_path / "self-hosted.json").write_text(json.dumps({"baseUrl": "http://localhost:9000/v1", "model": "m"}))
+    monkeypatch.setattr(commit_review, "settings_root", lambda: tmp_path)
+    monkeypatch.setattr(commit_review, "provider_environment", lambda: {"SELF_HOSTED_API_KEY": "test-key"})
+    monkeypatch.setattr(commit_review, "assert_account_assignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("SELF_HOSTED_THINKING_TOKEN_BUDGET", budget)
+    if budget not in {"", "1024"}:
+        with pytest.raises(ValueError, match="THINKING_TOKEN_BUDGET"):
+            commit_review.local_settings()
+    else:
+        settings = commit_review.local_settings()
+        assert settings.get("thinking_token_budget") == (1024 if budget else None)
+
+
+def test_changed_thinking_budget_restarts_saved_review(review, monkeypatch):
+    scan, diff, db = review
+    settings = {"base_url": "http://localhost:9000/v1", "model": "fixture-model", "api_key": "fixture-key"}
+    scan["extras"] = {
+        "diff_review": commit_review._checkpoint(
+            diff, commit_review._batch_hashes(diff["batches"]), settings, [{"summary": "old"}], 1
+        )
+    }
+    settings["thinking_token_budget"] = 1024
+    monkeypatch.setattr(commit_review, "local_settings", lambda: dict(settings))
+    calls = []
+    monkeypatch.setattr(commit_review, "review_diff", lambda *_args, **kwargs: calls.append(kwargs) or {"findings": []})
+    assert commit_review.process_commit_review(db, SimpleNamespace(), 4)
+    assert len(calls) == 1
+    assert calls[0]["thinking_token_budget"] == 1024
+    assert scan["extras"]["diff_review"]["findings"] == []
+    assert scan["extras"]["diff_review"]["model_snapshot"]["thinking_token_budget"] == 1024
+    assert "fixture-key" not in repr(scan["extras"])

@@ -18,6 +18,8 @@ MAX_REQUEST_BYTES = 160_000
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_FINDINGS = 50
 MAX_TIMEOUT_SECONDS = 300.0
+MAX_THINKING_TOKEN_BUDGET = 4096
+MAX_OUTPUT_TOKENS = 8192
 
 _DIFF_KEYS = {"base_commit", "head_commit", "patch", "files", "unreviewed", "no_changes"}
 _FILE_KEYS = {
@@ -132,6 +134,14 @@ def _validated_timeout(timeout_seconds: float) -> float:
     if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
         raise SelfHostedConfigurationError()
     return timeout
+
+
+def _validated_thinking_token_budget(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_THINKING_TOKEN_BUDGET:
+        raise SelfHostedConfigurationError("Thinking token budget must be an integer from 1 to 4096.")
+    return value
 
 
 def _completion_url(base_url: str) -> str:
@@ -355,19 +365,24 @@ def _post_chat_completion(
     api_key: str,
     messages: list[dict[str, str]],
     timeout_seconds: float,
+    thinking_token_budget: int | None = None,
 ) -> str:
     endpoint = _completion_url(base_url)
     model, api_key = _validate_credentials(model, api_key)
     timeout = _validated_timeout(timeout_seconds)
+    thinking_token_budget = _validated_thinking_token_budget(thinking_token_budget)
     payload = {
         "model": model,
         "messages": messages,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "source_review", "strict": True, "schema": _FINDINGS_SCHEMA},
         },
         "stream": False,
     }
+    if thinking_token_budget is not None:
+        payload["thinking_token_budget"] = thinking_token_budget
     try:
         request_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, UnicodeError):
@@ -501,9 +516,11 @@ def review_diff(
     model: str,
     api_key: str,
     timeout_seconds: float = 60,
+    thinking_token_budget: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Review a bounded two-commit patch and return only validated findings."""
 
+    thinking_token_budget = _validated_thinking_token_budget(thinking_token_budget)
     review_input, files_by_path = _validate_diff(diff)
     if review_input["no_changes"] or (not review_input["patch"] and not review_input["files"]):
         return {"findings": []}
@@ -529,11 +546,19 @@ def review_diff(
             {"role": "user", "content": user_prompt},
         ],
         timeout_seconds=timeout_seconds,
+        thinking_token_budget=thinking_token_budget,
     )
     return {"findings": _parse_findings(content, files_by_path, api_key=api_key.strip())}
 
 
-def check_connection(*, base_url: str, model: str, api_key: str, timeout_seconds: float = 60) -> dict[str, Any]:
+def check_connection(
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout_seconds: float = 60,
+    thinking_token_budget: int | None = None,
+) -> dict[str, Any]:
     """Check endpoint auth, exact model selection, and structured output without repository data."""
 
     content = _post_chat_completion(
@@ -545,6 +570,7 @@ def check_connection(*, base_url: str, model: str, api_key: str, timeout_seconds
             {"role": "user", "content": _CONNECTION_PROMPT},
         ],
         timeout_seconds=timeout_seconds,
+        thinking_token_budget=thinking_token_budget,
     )
     findings = _parse_findings(content, {}, api_key=api_key.strip())
     if findings:

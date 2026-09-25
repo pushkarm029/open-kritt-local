@@ -48,7 +48,13 @@ def local_settings():
     key = env.get("SELF_HOSTED_API_KEY")
     if not key:
         raise ValueError("Configure and activate the Self-hosted AI key in Accounts.")
-    return {"base_url": base_url, "model": model, "api_key": key}
+    result = {"base_url": base_url, "model": model, "api_key": key}
+    budget = os.getenv("SELF_HOSTED_THINKING_TOKEN_BUDGET", "")
+    if budget:
+        if not budget.isascii() or not budget.isdigit() or not 1 <= int(budget) <= 4096:
+            raise ValueError("SELF_HOSTED_THINKING_TOKEN_BUDGET must be an integer from 1 to 4096.")
+        result["thinking_token_budget"] = int(budget)
+    return result
 
 
 def _write_json(path, value):
@@ -178,6 +184,10 @@ def _batch_hashes(batches):
     ]
 
 
+def _model_snapshot(settings):
+    return {key: settings[key] for key in ("base_url", "model", "thinking_token_budget") if key in settings}
+
+
 def _checkpoint(diff, hashes, settings, findings, completed):
     return {
         "base_commit": diff["base_commit"],
@@ -189,7 +199,7 @@ def _checkpoint(diff, hashes, settings, findings, completed):
         "batches_completed": completed,
         "batches_total": len(hashes),
         "batch_hashes": hashes,
-        "model_snapshot": {"base_url": settings["base_url"], "model": settings["model"]},
+        "model_snapshot": _model_snapshot(settings),
     }
 
 
@@ -202,7 +212,7 @@ def _resume_checkpoint(previous, diff, hashes, settings):
             previous.get("head_commit") != diff["head_commit"],
             previous.get("batch_hashes") != hashes,
             previous.get("batches_total") != len(hashes),
-            previous.get("model_snapshot") != {"base_url": settings["base_url"], "model": settings["model"]},
+            previous.get("model_snapshot") != _model_snapshot(settings),
         )
     ):
         return [], 0
@@ -273,6 +283,7 @@ def process_commit_review(db, config, scan_id):
             ):
                 raise ValueError("Collected source review batches are invalid.")
             hashes = _batch_hashes(batches)
+            model_snapshot = _model_snapshot(settings)
             previous = (scan.get("extras") or {}).get("diff_review")
             findings, completed = _resume_checkpoint(previous, diff, hashes, settings)
             if not _save_checkpoint(conn, scan_id, marker, _checkpoint(diff, hashes, settings, findings, completed)):
@@ -281,10 +292,7 @@ def process_commit_review(db, config, scan_id):
                 if not _attempt_is_running(conn, scan_id, marker):
                     return False
                 settings = local_settings()
-                if (
-                    settings["base_url"] != scan["configuration"]["self_hosted_base_url"]
-                    or settings["model"] != scan["model"]
-                ):
+                if _model_snapshot(settings) != model_snapshot:
                     raise ValueError("Self-hosted AI configuration changed. Create a new review.")
                 findings = [*findings, *review_diff(batch, **settings, timeout_seconds=300)["findings"]]
                 completed += 1

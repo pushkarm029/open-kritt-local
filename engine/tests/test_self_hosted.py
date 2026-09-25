@@ -115,6 +115,8 @@ def test_review_diff_sends_bounded_structured_request_and_validates_finding_loca
     assert request["authorization"] == "Bearer local-secret"
     payload = json.loads(request["body"])
     assert payload["model"] == "review-model"
+    assert payload["max_tokens"] == 8192
+    assert "thinking_token_budget" not in payload
     assert payload["stream"] is False
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"]["strict"] is True
@@ -193,10 +195,39 @@ def test_check_connection_uses_the_exact_model_and_a_fixed_prompt_without_reposi
     assert request["path"] == "/v1/chat/completions"
     payload = json.loads(request["body"])
     assert payload["model"] == "exact-model"
+    assert payload["max_tokens"] == 8192
+    assert "thinking_token_budget" not in payload
     assert len(payload["messages"]) == 2
     assert "fixed connection check" in payload["messages"][1]["content"]
     assert "repository" in payload["messages"][1]["content"]
     assert "findings" in payload["response_format"]["json_schema"]["schema"]["properties"]
+
+
+@pytest.mark.parametrize("budget", [1, 1024, 4096])
+def test_explicit_thinking_budget_reaches_review_and_connection_requests(budget):
+    with _mock_endpoint(response=_provider_response()) as (base_url, requests):
+        assert review_diff(
+            _diff(), base_url=base_url, model="review-model", api_key="key", thinking_token_budget=budget
+        ) == {"findings": []}
+        assert check_connection(
+            base_url=base_url, model="review-model", api_key="key", thinking_token_budget=budget
+        ) == {"success": True, "model": "review-model"}
+
+    assert len(requests) == 2
+    for request in requests:
+        payload = json.loads(request["body"])
+        assert payload["max_tokens"] == 8192
+        assert payload["thinking_token_budget"] == budget
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 4097, 1.0, "1024"])
+def test_invalid_thinking_budget_fails_before_network(budget):
+    with _mock_endpoint(response=_provider_response()) as (base_url, requests):
+        with pytest.raises(SelfHostedConfigurationError, match="Thinking token budget"):
+            review_diff(_diff(), base_url=base_url, model="review-model", api_key="key", thinking_token_budget=budget)
+        with pytest.raises(SelfHostedConfigurationError, match="Thinking token budget"):
+            check_connection(base_url=base_url, model="review-model", api_key="key", thinking_token_budget=budget)
+    assert requests == []
 
 
 @pytest.mark.parametrize(

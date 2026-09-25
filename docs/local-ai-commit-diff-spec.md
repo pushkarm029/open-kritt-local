@@ -33,6 +33,14 @@ findings. Retry resumes from those batches if the revisions, model settings, and
 batch inputs still match. Partial results stay labeled incomplete until every
 batch finishes. Stop prevents further requests after the current request ends.
 
+Each request allows at most 8,192 generated tokens and 300 seconds. Truncated
+responses fail validation. For vLLM endpoints that support a thinking budget,
+set `SELF_HOSTED_THINKING_TOKEN_BUDGET` to 1 through 4,096 in the engine environment.
+With Compose, set it in `.env` and recreate the engine container. Leave it empty
+for other endpoints. This optional limit keeps reasoning enabled
+while reserving output tokens for the result. Changing it resets saved progress
+on retry. See [vLLM thinking budget control](https://docs.vllm.ai/en/latest/features/reasoning_outputs/#thinking-budget-control).
+
 Text processing has separate limits: 1 MiB per file revision and 8 MiB of source
 reads per comparison. The review input limit covers the patch and its metadata.
 Large files are checked for binary content using their first 8 KiB.
