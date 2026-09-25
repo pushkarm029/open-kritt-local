@@ -911,6 +911,8 @@ export function validateCommitDiffScan(body, { localNames = null } = {}) {
     'baseCommitSha',
     'commit_sha',
     'commitSha',
+    'review_kind',
+    'reviewKind',
     'launchPolicy',
     'launch_policy',
   ]);
@@ -920,6 +922,16 @@ export function validateCommitDiffScan(body, { localNames = null } = {}) {
   const mode = (body?.comparison_mode ?? body?.comparisonMode ?? '').toString().trim();
   if (mode !== 'commits') {
     push('comparison_mode', 'Comparison mode must be "commits".');
+  }
+  const snakeReviewKind = body?.review_kind;
+  const camelReviewKind = body?.reviewKind;
+  const reviewKind =
+    snakeReviewKind === undefined ? (camelReviewKind === undefined ? 'quick' : camelReviewKind) : snakeReviewKind;
+  if (
+    (snakeReviewKind !== undefined && camelReviewKind !== undefined && snakeReviewKind !== camelReviewKind) ||
+    !['quick', 'workflow'].includes(reviewKind)
+  ) {
+    push('review_kind', 'Review kind must be "quick" or "workflow".');
   }
 
   const kind = (body?.repo_kind ?? body?.repoKind ?? 'remote').toString().trim();
@@ -951,6 +963,7 @@ export function validateCommitDiffScan(body, { localNames = null } = {}) {
   if (errors.length) throw new ValidationError(errors);
   return {
     comparisonMode: 'commits',
+    reviewKind,
     repoKind: kind,
     repoFull,
     baseCommitSha: baseCommitSha.toLowerCase(),

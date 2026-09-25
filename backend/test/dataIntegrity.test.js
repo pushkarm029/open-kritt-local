@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 
 import { prismaUniqueConflict } from '../src/app.js';
 import { DEFAULT_WORKFLOW_NAMES } from '../src/lib/defaultWorkflows.js';
+import { DEFENSIVE_REVIEW_WORKFLOW_NAME } from '../src/lib/defensiveReviewWorkflow.js';
 import { validateScanJobLimit, ValidationError } from '../src/lib/validation.js';
 import { agentSkillMutationState, countAgentSkillScanUsage } from '../src/routes/agentSkills.js';
 import { summarizeCanonicalFindings } from '../src/routes/overview.js';
@@ -80,6 +81,26 @@ test('referenced workflows cannot be rewritten or have their steps deleted', asy
   });
 
   assert.deepEqual(result, { kind: 'in-use', scanCount: 3 });
+  assert.deepEqual(mutations, []);
+});
+
+test('reserved defensive review workflow cannot be replaced or deleted', async () => {
+  const mutations = [];
+  const tx = {
+    $queryRaw: async () => [],
+    workflow: {
+      findUnique: async () => ({ id: 7n, name: DEFENSIVE_REVIEW_WORKFLOW_NAME, stepIds: [10n] }),
+      update: async () => mutations.push('workflow.update'),
+      delete: async () => mutations.push('workflow.delete'),
+    },
+    scan: { count: async () => mutations.push('scan.count') },
+    step: {
+      create: async () => mutations.push('step.create'),
+      deleteMany: async () => mutations.push('step.deleteMany'),
+    },
+  };
+  assert.deepEqual(await replaceWorkflowIfUnused(tx, 7n, { name: 'Renamed' }), { kind: 'reserved' });
+  assert.deepEqual(await deleteWorkflowIfUnused(tx, 7n), { kind: 'reserved' });
   assert.deepEqual(mutations, []);
 });
 

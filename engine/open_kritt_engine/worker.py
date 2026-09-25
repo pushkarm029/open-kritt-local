@@ -23,6 +23,7 @@ from .codex_updater import CodexCliGate, CodexUpdater
 from .commit_review import fail_commit_review, process_commit_review, process_connection_check
 from .config import EngineConfig
 from .db import QUOTA_RETRY_MAX_SECONDS, Database, now_utc
+from .defensive_review import process_defensive_review
 from .generation import GenerationRunner, GenerationValidationError
 from .harnesses import (
     CAPACITY_RATE_LIMIT_FAILURES,
@@ -1359,6 +1360,10 @@ class Worker:
 
     def process_scan(self, scan: dict[str, Any], worker_id: int = 1) -> bool:
         if scan.get("comparison_mode") == "commits":
+            if (scan.get("configuration") or {}).get("review_kind") not in (None, "quick"):
+                return process_defensive_review(
+                    self.db, self.config, int(scan["id"]), can_pick_job=lambda: self._worker_can_pick_job(worker_id)
+                )
             return process_commit_review(self.db, self.config, int(scan["id"]))
         scan_id = int(scan["id"])
         did_work = False

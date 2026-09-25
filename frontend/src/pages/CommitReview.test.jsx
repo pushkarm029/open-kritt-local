@@ -21,7 +21,10 @@ describe('two-commit review', () => {
       base_commit_sha: 'a'.repeat(40),
       commit_sha: 'b'.repeat(40),
       comparison_mode: 'commits',
+      review_kind: 'quick',
     });
+    expect(commitReviewDraft().review_kind).toBe('workflow');
+    expect(commitReviewDraft({ configuration: { review_kind: 'workflow' } }).review_kind).toBe('workflow');
   });
 
   it('requires two explicit commit IDs and labels the inputs', () => {
@@ -124,5 +127,65 @@ describe('two-commit review', () => {
     expect(completed).toContain('Reviewed 8 of 8 batches.');
     expect(completed).not.toContain('Partial results.');
     expect(completed).toContain('No findings in the reviewed source.');
+  });
+
+  it('does not claim a defensive workflow is clean before its report finishes', () => {
+    const html = renderToStaticMarkup(
+      createElement(SourceReviewFindings, {
+        review: {
+          files: [{ path: 'code.py' }],
+          findings: [],
+          workflow: { name: 'Local defensive review v1', stages: [{ name: 'Scope', status: 'completed' }] },
+        },
+      })
+    );
+    expect(html).toContain('Findings will appear after candidate checks and the report finish.');
+    expect(html).not.toContain('No findings in the reviewed source.');
+  });
+
+  it('renders defensive stages and limits as read-only results', () => {
+    const html = renderToStaticMarkup(
+      createElement(SourceReviewFindings, {
+        review: {
+          files: [{ path: 'code.py' }],
+          findings: [],
+          workflow: {
+            name: 'Local defensive review v1',
+            version: 1,
+            stages: [{ name: 'Scope', status: 'completed', completed: 3, total: 3 }],
+            limitations: ['One file was skipped.'],
+            report: {
+              summary: 'One source candidate needs validation.',
+              files_reviewed: 1,
+              review_passes: 2,
+              supported: 0,
+              uncertain: 1,
+              dismissed: 3,
+            },
+            uncertain_findings: [
+              {
+                summary: 'Possible unchecked path',
+                side: 'head',
+                path: 'code.py',
+                line: 7,
+                confidence: 'low',
+                explanation: 'The changed branch may lack a guard.',
+                remediation: 'Check the caller contract.',
+                validation_explanation: 'The caller is outside the reviewed diff.',
+              },
+            ],
+          },
+        },
+      })
+    );
+    expect(html).toContain('Local defensive review v1');
+    expect(html).toContain('Scope: completed (3/3)');
+    expect(html).toContain('One file was skipped.');
+    expect(html).toContain('One source candidate needs validation.');
+    expect(html).toContain('Files reviewed: 1');
+    expect(html).toContain('Needs validation (1)');
+    expect(html).toContain('The caller is outside the reviewed diff.');
+    expect(html).not.toContain('No findings in the reviewed source.');
+    expect(html).not.toContain('malicious_input_example');
   });
 });

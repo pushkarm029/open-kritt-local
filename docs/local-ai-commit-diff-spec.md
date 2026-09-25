@@ -16,7 +16,9 @@ its account active. Test saved connection sends a fixed prompt from the engine
 and checks that the model returns the required response format.
 
 New Scan opens in Two commits mode. Select a repository, enter Base commit and
-Head commit IDs, then start the review. The engine resolves abbreviated IDs before
+Head commit IDs, choose Defensive workflow or Quick review, then start the review. New reviews
+default to Defensive workflow. Duplicated scans keep their saved mode.
+The engine resolves abbreviated IDs before
 calling the model. Results show both full IDs, source findings, and skipped changes.
 Export review downloads JSON. Full repository remains available in Review scope.
 
@@ -28,7 +30,7 @@ the changed lines and their original base or head locations.
 If all changed files are unsupported, results state that no source was reviewed
 and no model request was made.
 
-Results show completed and total batches. Each successful batch saves its
+Quick review results show completed and total batches. Each successful batch saves its
 findings. Retry resumes from those batches if the revisions, model settings, and
 batch inputs still match. Partial results stay labeled incomplete until every
 batch finishes. Stop prevents further requests after the current request ends.
@@ -38,8 +40,8 @@ responses fail validation. For vLLM endpoints that support a thinking budget,
 set `SELF_HOSTED_THINKING_TOKEN_BUDGET` to 1 through 4,096 in the engine environment.
 With Compose, set it in `.env` and recreate the engine container. Leave it empty
 for other endpoints. This optional limit keeps reasoning enabled
-while reserving output tokens for the result. Changing it resets saved progress
-on retry. See [vLLM thinking budget control](https://docs.vllm.ai/en/latest/features/reasoning_outputs/#thinking-budget-control).
+while reserving output tokens for the result. For quick reviews, changing it resets saved progress on retry. Defensive workflows
+require a new review when model settings or source inputs change. See [vLLM thinking budget control](https://docs.vllm.ai/en/latest/features/reasoning_outputs/#thinking-budget-control).
 
 Text processing has separate limits: 1 MiB per file revision and 8 MiB of source
 reads per comparison. The review input limit covers the patch and its metadata.
@@ -47,6 +49,48 @@ Large files are checked for binary content using their first 8 KiB.
 Files that still exceed the processing limits fail the comparison.
 
 ![Two-commit review in the existing UI](images/local-commit-review.png)
+
+## Defensive workflow
+
+The built-in `Local defensive review v1` uses Kritt's workflow queue, persistent
+step records, cancellation, and retry controls. It has six fixed stages:
+
+1. Scope records every reviewable changed file.
+2. Contract context records trust boundaries and invariants from complete base
+   and head source text, including unchanged files with matching source extensions.
+3. Access and validation review examines each changed file.
+4. State and accounting review examines each changed file independently.
+5. Check findings assigns every candidate a supported, dismissed, or uncertain
+   disposition based on the source and suggested correction.
+6. Report checks coverage, combines supported findings, and preserves uncertainty.
+
+Stages 3 and 4 each feed candidate checks. The queue can check one pass before
+starting the other. Empty candidate sets need no additional model call. The final
+report requires both passes and their checks for every reviewable changed file.
+Completion is based on this coverage, not a minimum elapsed time.
+
+Each model request includes bounded complete source context. The adapter accepts
+up to 200,000 bytes per source revision and 750,000 bytes of serialized input,
+with a 1 MiB HTTP request limit. Oversized input fails explicitly. Unsupported
+changes and omitted supporting context remain visible in the result or export.
+
+Connection failures and invalid responses retry using `ENGINE_RETRY_COUNT`.
+Authentication, configuration, and unsupported-model failures stop immediately.
+Completed jobs survive retry. Stop and new-attempt guards prevent stale model
+responses from being saved. The current request can finish after Stop.
+
+The workflow is reserved and cannot be edited through generic workflow routes.
+It accepts neither custom prompts nor post scripts. It uses read-only model calls
+without shell tools or execution of the reviewed code. Findings are source-backed
+candidates for human review. Completion does not establish runtime validity or
+prove the contracts secure.
+
+The UI shows stage progress, coverage, limitations, supported findings, and
+candidates needing validation. A pending report does not display a clean-review
+claim. JSON export preserves the same result. Existing scans without a saved
+review mode keep the original quick-review behavior.
+
+![Completed defensive workflow with synthetic fixture data](images/local-defensive-review.png)
 
 ## Scope
 
@@ -183,3 +227,7 @@ Verification uses disposable Git fixtures, a mock model, and an isolated
 database. The supplied Qwen endpoint passed a connection and response-format
 check from the isolated engine. Multi-batch tests cover complete changed-line
 coverage, saved progress, retries, cancellation, and failures.
+
+The defensive workflow also passed an isolated Postgres and HTTP mock smoke test:
+the API created the reserved workflow, all seven jobs for a one-file comparison
+completed, and the UI and JSON export retained the synthetic finding and coverage.

@@ -20,6 +20,7 @@ export function commitReviewDraft(source) {
     base_commit_sha: source?.baseCommitSha || '',
     commit_sha: source?.commitSha || '',
     comparison_mode: 'commits',
+    review_kind: source ? source.configuration?.review_kind || 'quick' : 'workflow',
   };
 }
 
@@ -116,6 +117,22 @@ export function CommitReviewForm({ source }) {
           if (valid && !busy) submit();
         }}
       >
+        <label style={field}>
+          Review method
+          <select
+            value={draft.review_kind}
+            onChange={(event) => update({ review_kind: event.target.value })}
+            disabled={busy}
+          >
+            <option value="workflow">Defensive workflow</option>
+            <option value="quick">Quick diff review</option>
+          </select>
+        </label>
+        <p style={{ color: 'var(--text-2)' }}>
+          {draft.review_kind === 'workflow'
+            ? 'Map changed units and contract context, review access and state changes, check findings, then report coverage.'
+            : 'Review changed source in batches and report findings.'}
+        </p>
         <label style={field}>
           Repository source
           <select
@@ -297,11 +314,70 @@ export function CommitReviewResults({ scan, reload }) {
   );
 }
 
+function SourceFinding({ finding }) {
+  return (
+    <article style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 18, marginBottom: 16 }}>
+      <h2 style={{ fontSize: 18 }}>{finding.summary}</h2>
+      <p className="mono">
+        {finding.side} · {finding.path}:{finding.line} · {finding.confidence} confidence
+      </p>
+      <Markdown source={finding.explanation} />
+      <h3 style={{ fontSize: 14 }}>Suggested correction</h3>
+      <Markdown source={finding.remediation} />
+      {finding.validation_explanation && (
+        <>
+          <h3 style={{ fontSize: 14 }}>Why this needs validation</h3>
+          <Markdown source={finding.validation_explanation} />
+        </>
+      )}
+    </article>
+  );
+}
+
 export function SourceReviewFindings({ review }) {
   const hasBatches = Number.isInteger(review.batches_total) && review.batches_total > 0;
   const incomplete = hasBatches && review.batches_completed < review.batches_total;
+  const workflow = review.workflow;
   return (
     <>
+      {workflow && (
+        <section aria-label="Defensive workflow progress">
+          <h2 style={{ fontSize: 18 }}>{workflow.name || 'Defensive workflow'}</h2>
+          {Array.isArray(workflow.stages) && (
+            <ol>
+              {workflow.stages.map((stage, index) => (
+                <li key={`${stage.name}-${index}`}>
+                  {stage.name}: {stage.status}
+                  {Number.isInteger(stage.completed) && Number.isInteger(stage.total)
+                    ? ` (${stage.completed}/${stage.total})`
+                    : ''}
+                </li>
+              ))}
+            </ol>
+          )}
+          {workflow.report && (
+            <div aria-label="Review report">
+              <h3 style={{ fontSize: 16 }}>Review report</h3>
+              {workflow.report.summary && <Markdown source={workflow.report.summary} />}
+              <p>
+                Files reviewed: {workflow.report.files_reviewed} · Review passes: {workflow.report.review_passes} ·
+                Supported: {workflow.report.supported} · Need validation: {workflow.report.uncertain} · Dismissed:{' '}
+                {workflow.report.dismissed}
+              </p>
+            </div>
+          )}
+          {Array.isArray(workflow.limitations) && workflow.limitations.length > 0 && (
+            <div role="note">
+              <p>Review limits:</p>
+              <ul>
+                {workflow.limitations.map((limitation, index) => (
+                  <li key={index}>{limitation}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
       {hasBatches && (
         <div role="status" aria-live="polite">
           <p>
@@ -327,27 +403,29 @@ export function SourceReviewFindings({ review }) {
       )}
       {!review.no_changes && !review.findings?.length && (
         <p>
-          {review.files?.length === 0
-            ? 'No source files could be reviewed. No model request was made.'
-            : incomplete
-              ? 'No findings in completed batches so far.'
-              : 'No findings in the reviewed source. The changes may still contain defects.'}
+          {workflow && !workflow.report
+            ? 'Findings will appear after candidate checks and the report finish.'
+            : review.files?.length === 0
+              ? 'No source files could be reviewed. No model request was made.'
+              : incomplete
+                ? 'No findings in completed batches so far.'
+                : workflow?.uncertain_findings?.length
+                  ? 'No supported findings in the reviewed source. Candidates needing validation are shown below.'
+                  : 'No findings in the reviewed source. The changes may still contain defects.'}
         </p>
       )}
       {review.findings?.map((finding, index) => (
-        <article
-          key={index}
-          style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 18, marginBottom: 16 }}
-        >
-          <h2 style={{ fontSize: 18 }}>{finding.summary}</h2>
-          <p className="mono">
-            {finding.side} · {finding.path}:{finding.line} · {finding.confidence} confidence
-          </p>
-          <Markdown source={finding.explanation} />
-          <h3 style={{ fontSize: 14 }}>Suggested correction</h3>
-          <Markdown source={finding.remediation} />
-        </article>
+        <SourceFinding key={index} finding={finding} />
       ))}
+      {workflow?.uncertain_findings?.length > 0 && (
+        <section aria-label="Findings needing validation">
+          <h2 style={{ fontSize: 18 }}>Needs validation ({workflow.uncertain_findings.length})</h2>
+          <p>These source candidates need more evidence. No runtime validation was performed.</p>
+          {workflow.uncertain_findings.map((finding, index) => (
+            <SourceFinding key={index} finding={finding} />
+          ))}
+        </section>
+      )}
     </>
   );
 }

@@ -19,6 +19,7 @@ import { localCommitReviewNames, localRepoNames } from '../lib/localRepos.js';
 import { assertModelSelectionAvailable } from '../lib/modelSelection.js';
 import { isModelProviderConfigured } from '../lib/modelProviders.js';
 import { readSelfHostedConfig } from '../lib/selfHostedConfig.js';
+import { ensureDefensiveReviewWorkflow, isDefensiveReviewWorkflowName } from '../lib/defensiveReviewWorkflow.js';
 import { lockWorkflowForScan } from '../lib/workflowLocks.js';
 import { lockPostScriptForScan } from '../lib/postScriptLocks.js';
 import { lockAgentSkillForScan } from '../lib/agentSkillLocks.js';
@@ -125,15 +126,24 @@ export function scanComparisonMode(body = {}) {
   return mode ?? 'full_repository';
 }
 
-export async function createCommitDiffScan(reqBody = {}, { localNames = localCommitReviewNames(), db = prisma } = {}) {
+export async function createCommitDiffScan(
+  reqBody = {},
+  {
+    localNames = localCommitReviewNames(),
+    db = prisma,
+    readConfig = readSelfHostedConfig,
+    providerConfigured = isModelProviderConfigured,
+    ensureWorkflow = ensureDefensiveReviewWorkflow,
+  } = {}
+) {
   const valid = validateCommitDiffScan(reqBody, { localNames });
-  const selfHosted = await readSelfHostedConfig();
+  const selfHosted = await readConfig();
   if (!selfHosted.baseUrl || !selfHosted.model) {
     throw new ValidationError([
       { field: 'model_provider', message: 'Configure Self-hosted AI in Accounts before starting a commit review.' },
     ]);
   }
-  if (!isModelProviderConfigured('self_hosted')) {
+  if (!providerConfigured('self_hosted')) {
     throw new ValidationError([
       {
         field: 'model_provider',
@@ -152,36 +162,43 @@ export async function createCommitDiffScan(reqBody = {}, { localNames = localCom
     throw error;
   }
 
-  return db.scan.create({
-    data: {
-      // Diff reviews bypass the workflow executor but retain the existing scan
-      // row shape so list, status, retry, and deletion APIs remain unchanged.
-      workflowId: DIFF_REVIEW_RESOURCE_ID,
-      postScriptId: DIFF_REVIEW_RESOURCE_ID,
-      repoFull: valid.repoFull,
-      repoKind: valid.repoKind,
-      commitSha: valid.commitSha,
-      comparisonMode: 'commits',
-      baseCommitSha: valid.baseCommitSha,
-      repoScope: 'two commits',
-      dependencies: [],
-      configuration: {
-        self_hosted_base_url: selfHosted.baseUrl,
-      },
-      model: selfHosted.model,
-      modelProvider: 'self_hosted',
-      harness: 'self-hosted',
-      thinkingEffort: 'default',
-      modelOverrides: {},
-      status: launchDecision.status,
-      config: {},
-      scopes: { files: [], lines: [] },
-      reasoning: Prisma.DbNull,
-      severityRanker: null,
-      extra: Prisma.DbNull,
-      extras: Prisma.DbNull,
+  const data = {
+    // Quick reviews use the zero workflow ID; defensive reviews receive a
+    // curated workflow ID below. Both retain the existing scan row shape.
+    workflowId: DIFF_REVIEW_RESOURCE_ID,
+    postScriptId: DIFF_REVIEW_RESOURCE_ID,
+    repoFull: valid.repoFull,
+    repoKind: valid.repoKind,
+    commitSha: valid.commitSha,
+    comparisonMode: 'commits',
+    baseCommitSha: valid.baseCommitSha,
+    repoScope: 'two commits',
+    dependencies: [],
+    configuration: {
+      self_hosted_base_url: selfHosted.baseUrl,
+      review_kind: valid.reviewKind,
+      ...(valid.reviewKind === 'workflow' ? { source_review_version: 1 } : {}),
     },
-  });
+    model: selfHosted.model,
+    modelProvider: 'self_hosted',
+    harness: 'self-hosted',
+    thinkingEffort: 'default',
+    modelOverrides: {},
+    status: launchDecision.status,
+    config: {},
+    scopes: { files: [], lines: [] },
+    reasoning: Prisma.DbNull,
+    severityRanker: null,
+    extra: Prisma.DbNull,
+    extras: Prisma.DbNull,
+  };
+  if (valid.reviewKind === 'workflow') {
+    return db.$transaction(async (tx) => {
+      const workflow = await ensureWorkflow(tx);
+      return tx.scan.create({ data: { ...data, workflowId: workflow.id } });
+    });
+  }
+  return db.scan.create({ data });
 }
 
 async function createCommitDiffScanResponse(req, res, next) {
@@ -1191,6 +1208,9 @@ router.post('/', async (req, res, next) => {
       const postScript = postScriptMap.get(`${valid.postScriptId}`);
       const errors = [];
       if (!workflow) errors.push({ field: 'workflowId', message: 'Workflow does not exist.' });
+      if (workflow && isDefensiveReviewWorkflowName(workflow.name)) {
+        errors.push({ field: 'workflowId', message: 'Use Two commits to start the defensive review workflow.' });
+      }
       if (!postScript) errors.push({ field: 'postScriptId', message: 'Post-script does not exist.' });
       if (invalidPostScriptIds.length)
         errors.push({

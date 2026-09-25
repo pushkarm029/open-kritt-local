@@ -16,6 +16,7 @@ from typing import Any
 MAX_INPUT_BYTES = 120_000
 MAX_REQUEST_BYTES = 160_000
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_REQUEST_BYTES_HARD_LIMIT = 1024 * 1024
 MAX_FINDINGS = 50
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_THINKING_TOKEN_BUDGET = 4096
@@ -366,18 +367,42 @@ def _post_chat_completion(
     messages: list[dict[str, str]],
     timeout_seconds: float,
     thinking_token_budget: int | None = None,
+    response_schema: dict[str, Any] | None = None,
+    request_byte_limit: int | None = None,
 ) -> str:
     endpoint = _completion_url(base_url)
     model, api_key = _validate_credentials(model, api_key)
     timeout = _validated_timeout(timeout_seconds)
     thinking_token_budget = _validated_thinking_token_budget(thinking_token_budget)
+    if response_schema is not None:
+        if not isinstance(response_schema, dict):
+            raise SelfHostedConfigurationError()
+        try:
+            from jsonschema import Draft202012Validator
+
+            Draft202012Validator.check_schema(response_schema)
+        except Exception as exc:
+            raise SelfHostedConfigurationError() from exc
+    if request_byte_limit is None:
+        request_byte_limit = MAX_REQUEST_BYTES
+    if (
+        isinstance(request_byte_limit, bool)
+        or not isinstance(request_byte_limit, int)
+        or request_byte_limit <= 0
+        or request_byte_limit > MAX_REQUEST_BYTES_HARD_LIMIT
+    ):
+        raise SelfHostedConfigurationError()
     payload = {
         "model": model,
         "messages": messages,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "source_review", "strict": True, "schema": _FINDINGS_SCHEMA},
+            "json_schema": {
+                "name": "source_review",
+                "strict": True,
+                "schema": response_schema or _FINDINGS_SCHEMA,
+            },
         },
         "stream": False,
     }
@@ -387,7 +412,7 @@ def _post_chat_completion(
         request_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, UnicodeError):
         raise SelfHostedConfigurationError() from None
-    if len(request_body) > MAX_REQUEST_BYTES:
+    if len(request_body) > request_byte_limit:
         raise SelfHostedInputLimitError()
 
     request = urllib.request.Request(

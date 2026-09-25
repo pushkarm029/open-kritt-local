@@ -92,6 +92,7 @@ def test_collects_edit_deletion_and_rename_from_committed_trees(tmp_path):
     assert result["base_commit"] == base
     assert result["head_commit"] == head
     assert result["no_changes"] is False
+    assert "sources" not in result
     assert result["unreviewed"] == [{"path": "new-name.txt", "reason": "rename has no changed source lines"}]
     entries = {entry["path"]: entry for entry in result["files"]}
     assert entries["edit.txt"] == {
@@ -133,6 +134,7 @@ def test_metadata_only_rename_and_mode_change_are_explicitly_unreviewed(tmp_path
         "mode.txt": "change has no source lines to review",
         "new.txt": "rename has no changed source lines",
     }
+    assert collect_commit_diff(repo, base, head, include_sources=True)["sources"] == []
     monkeypatch.setattr(self_hosted, "_post_chat_completion", lambda **_kwargs: pytest.fail("unexpected inference"))
     assert self_hosted.review_diff(result, base_url="https://unused.example/v1", model="m", api_key="k") == {
         "findings": []
@@ -190,6 +192,12 @@ def test_identical_trees_are_explicit_and_abbreviations_resolve(tmp_path):
 
     batched = collect_commit_diff(repo, base, head, batch_bytes=120_000)
     assert batched == {**result, "batches": []}
+    assert collect_commit_diff(repo, base, head, include_sources=True) == {**result, "sources": []}
+    assert collect_commit_diff(repo, base, head, include_sources=True, include_context=True) == {
+        **result,
+        "sources": [],
+        "context_unreviewed": [],
+    }
 
 
 def test_batch_mode_keeps_default_diff_contract_for_small_change(tmp_path):
@@ -508,10 +516,12 @@ def test_file_and_byte_limits_fail_whole_comparison(tmp_path):
 def test_small_patch_in_large_text_file_uses_review_input_limit(tmp_path):
     repo = _repo(tmp_path / "repo")
     lines = [f"line {number:05d}\n" for number in range(8000)]
-    (repo / "code.txt").write_text("".join(lines), encoding="utf-8")
+    base_text = "".join(lines)
+    (repo / "code.txt").write_text(base_text, encoding="utf-8")
     base = _commit(repo, "base")
     lines[4000] = "changed line 04000\n"
-    (repo / "code.txt").write_text("".join(lines), encoding="utf-8")
+    head_text = "".join(lines)
+    (repo / "code.txt").write_text(head_text, encoding="utf-8")
     head = _commit(repo, "one line")
 
     result = collect_commit_diff(repo, base, head)
@@ -519,6 +529,81 @@ def test_small_patch_in_large_text_file_uses_review_input_limit(tmp_path):
     assert len(result["patch"].encode("utf-8")) < 1000
     assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) < 120_000
     assert result["files"][0]["head_changed_lines"] == [[4001, 4001]]
+
+    with_sources = collect_commit_diff(repo, base, head, include_sources=True)
+    assert with_sources["sources"] == [{"path": "code.txt", "base": base_text, "head": head_text}]
+    assert "line 00000" not in with_sources["patch"]
+    assert len(json.dumps(with_sources, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 120_000
+    assert {key: value for key, value in with_sources.items() if key != "sources"} == result
+
+
+def test_included_sources_keep_exact_decoded_text_for_edits_additions_and_deletions(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    base_text = "café\r\nkeep\r\nlast"
+    head_text = "café\r\nchanged\r\nlast"
+    (repo / "edit.txt").write_bytes(base_text.encode("utf-8"))
+    (repo / "deleted.txt").write_bytes(b"removed without newline")
+    base = _commit(repo, "base")
+    (repo / "edit.txt").write_bytes(head_text.encode("utf-8"))
+    (repo / "deleted.txt").unlink()
+    (repo / "added.txt").write_bytes(b"new\r\nfile")
+    head = _commit(repo, "head")
+
+    result = collect_commit_diff(repo, base, head, include_sources=True, batch_bytes=120_000)
+
+    assert {item["path"]: item for item in result["sources"]} == {
+        "edit.txt": {"path": "edit.txt", "base": base_text, "head": head_text},
+        "deleted.txt": {"path": "deleted.txt", "base": "removed without newline", "head": ""},
+        "added.txt": {"path": "added.txt", "base": "", "head": "new\r\nfile"},
+    }
+    assert {item["path"] for item in result["sources"]} == {item["path"] for item in result["files"]}
+    assert all("sources" not in batch for batch in result["batches"])
+
+
+def test_context_adds_only_unchanged_matching_text_and_reports_omissions(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "main.rs").write_text("before\n", encoding="utf-8")
+    (repo / "helper.rs").write_text("fn helper() { café(); }\r\n", encoding="utf-8", newline="")
+    (repo / "other.py").write_text("unrelated\n", encoding="utf-8")
+    (repo / "binary.rs").write_bytes(b"\0binary")
+    (repo / "invalid.rs").write_bytes(b"invalid \xff")
+    (repo / "link.rs").symlink_to("helper.rs")
+    base = _commit(repo, "base")
+    (repo / "main.rs").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "head")
+
+    without_context = collect_commit_diff(repo, base, head, include_sources=True)
+    result = collect_commit_diff(repo, base, head, include_sources=True, include_context=True, batch_bytes=120_000)
+
+    assert without_context["sources"] == [{"path": "main.rs", "base": "before\n", "head": "after\n"}]
+    assert result["sources"] == [
+        {"path": "main.rs", "base": "before\n", "head": "after\n"},
+        {"path": "helper.rs", "base": "fn helper() { café(); }\r\n", "head": "fn helper() { café(); }\r\n"},
+    ]
+    assert result["context_unreviewed"] == [
+        {"path": "binary.rs", "reason": "binary context is unsupported"},
+        {"path": "invalid.rs", "reason": "context text is not valid UTF-8"},
+        {"path": "link.rs", "reason": "symlink context is unsupported"},
+    ]
+    assert set(result["batches"][0]) == {"base_commit", "head_commit", "patch", "files", "unreviewed", "no_changes"}
+
+
+def test_context_does_not_duplicate_renamed_source_path(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    source = "".join(f"line {number}\n" for number in range(30))
+    (repo / "old.rs").write_text(source, encoding="utf-8")
+    (repo / "helper.rs").write_text("helper\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "old.rs").rename(repo / "new.rs")
+    (repo / "new.rs").write_text(source.replace("line 15\n", "edited line 15\n"), encoding="utf-8")
+    head = _commit(repo, "head")
+
+    result = collect_commit_diff(repo, base, head, include_sources=True, include_context=True)
+
+    assert result["files"][0]["status"] == "renamed"
+    assert [item["path"] for item in result["sources"]] == ["new.rs", "helper.rs"]
+    assert result["sources"][0]["base"] == source
+    assert result["sources"][0]["head"] == source.replace("line 15\n", "edited line 15\n")
 
 
 def test_source_object_processing_limit_is_separate_from_review_input(tmp_path):
@@ -528,8 +613,9 @@ def test_source_object_processing_limit_is_separate_from_review_input(tmp_path):
     (repo / "large.txt").write_text("a" * (1024 * 1024) + "b", encoding="utf-8")
     head = _commit(repo, "edit")
 
-    with pytest.raises(CommitDiffError, match="1 MiB processing limit"):
-        collect_commit_diff(repo, base, head)
+    for include_sources in (False, True):
+        with pytest.raises(CommitDiffError, match="1 MiB processing limit"):
+            collect_commit_diff(repo, base, head, include_sources=include_sources)
 
 
 def test_total_source_processing_limit_is_bounded_across_files(tmp_path):
@@ -541,8 +627,48 @@ def test_total_source_processing_limit_is_bounded_across_files(tmp_path):
         (repo / f"file-{number}.txt").write_text(str(number) * 479_999 + "x", encoding="utf-8")
     head = _commit(repo, "edit")
 
+    for include_sources in (False, True):
+        with pytest.raises(CommitDiffError, match="8 MiB source processing limit"):
+            collect_commit_diff(repo, base, head, include_sources=include_sources)
+
+
+def test_unchanged_context_uses_per_blob_processing_cap(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "main.rs").write_text("before\n", encoding="utf-8")
+    (repo / "large.rs").write_text("x" * (1024 * 1024 + 1), encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "main.rs").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "head")
+
+    assert len(collect_commit_diff(repo, base, head, include_sources=True)["sources"]) == 1
+    with pytest.raises(CommitDiffError, match="1 MiB processing limit"):
+        collect_commit_diff(repo, base, head, include_sources=True, include_context=True)
+
+
+def test_unchanged_context_uses_total_processing_cap(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "main.rs").write_text("before\n", encoding="utf-8")
+    for number in range(9):
+        (repo / f"helper-{number}.rs").write_text(str(number) * 1_000_000, encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "main.rs").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "head")
+
     with pytest.raises(CommitDiffError, match="8 MiB source processing limit"):
-        collect_commit_diff(repo, base, head)
+        collect_commit_diff(repo, base, head, include_sources=True, include_context=True)
+
+
+def test_context_tree_manifest_has_explicit_file_limit(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    (repo / "main.rs").write_text("before\n", encoding="utf-8")
+    for number in range(1000):
+        (repo / f"other-{number:04d}.txt").write_bytes(b"")
+    base = _commit(repo, "base")
+    (repo / "main.rs").write_text("after\n", encoding="utf-8")
+    head = _commit(repo, "head")
+
+    with pytest.raises(CommitDiffError, match="context tree manifest exceeds the 1000-file limit"):
+        collect_commit_diff(repo, base, head, include_sources=True, include_context=True)
 
 
 def test_serialized_review_input_includes_metadata_in_byte_limit(tmp_path):
@@ -563,12 +689,14 @@ def test_local_collector_uses_pinned_repository_and_git_directory_descriptors(tm
     root.mkdir()
     repo = _repo(root / "selected")
     (repo / "file.txt").write_text("base\n", encoding="utf-8")
+    (repo / "helper.txt").write_text("selected helper\n", encoding="utf-8")
     base = _commit(repo, "base")
     (repo / "file.txt").write_text("selected head\n", encoding="utf-8")
     head = _commit(repo, "head")
 
     decoy = _repo(root / "decoy")
     (decoy / "file.txt").write_text("decoy content\n", encoding="utf-8")
+    (decoy / "helper.txt").write_text("decoy helper\n", encoding="utf-8")
     _commit(decoy, "decoy")
     root_alias = tmp_path / "root-alias"
     root_alias.symlink_to(root, target_is_directory=True)
@@ -589,12 +717,19 @@ def test_local_collector_uses_pinned_repository_and_git_directory_descriptors(tm
         return run_git(repo_dir, args, **kwargs)
 
     monkeypatch.setattr(commit_diff, "_run_git", swap_path_before_first_git)
-    result = commit_diff.collect_local_commit_diff(root_alias, "selected", base, head)
+    result = commit_diff.collect_local_commit_diff(
+        root_alias, "selected", base, head, include_sources=True, include_context=True
+    )
 
     assert swapped
     assert result["files"][0]["path"] == "file.txt"
     assert "+selected head" in result["patch"]
     assert "decoy content" not in result["patch"]
+    assert result["sources"] == [
+        {"path": "file.txt", "base": "base\n", "head": "selected head\n"},
+        {"path": "helper.txt", "base": "selected helper\n", "head": "selected helper\n"},
+    ]
+    assert result["context_unreviewed"] == []
 
 
 def test_local_collector_passes_batch_budget_through_pinned_directory(tmp_path):
@@ -610,6 +745,22 @@ def test_local_collector_passes_batch_budget_through_pinned_directory(tmp_path):
 
     assert len(result["batches"]) == 1
     _assert_batches_cover_changes(result, 120_000)
+
+
+def test_include_sources_requires_bool_before_git_reads(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "repo")
+    (repo / "file.txt").write_text("content\n", encoding="utf-8")
+    commit = _commit(repo, "base")
+    monkeypatch.setattr(commit_diff, "_run_git", lambda *_args, **_kwargs: pytest.fail("unexpected Git read"))
+
+    with pytest.raises(CommitDiffError, match="include_sources must be a boolean"):
+        collect_commit_diff(repo, commit, commit, include_sources=1)
+    with pytest.raises(CommitDiffError, match="include_sources must be a boolean"):
+        commit_diff.collect_local_commit_diff(tmp_path, "repo", commit, commit, include_sources="yes")
+    with pytest.raises(CommitDiffError, match="include_context must be a boolean"):
+        collect_commit_diff(repo, commit, commit, include_sources=True, include_context=1)
+    with pytest.raises(CommitDiffError, match="include_context requires include_sources"):
+        commit_diff.collect_local_commit_diff(tmp_path, "repo", commit, commit, include_context=True)
 
 
 def test_local_collector_rejects_repository_symlink_git_symlink_and_linked_worktree(tmp_path):

@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { validateWorkflow } from '../lib/validation.js';
+import { ValidationError, validateWorkflow } from '../lib/validation.js';
 import { assembleWorkflows, assembleWorkflow } from '../lib/repo.js';
 import { VULNERABILITIES_TABLE, STEP_RESULTS_TABLE } from '../lib/constants.js';
 import { ensureDefaultWorkflows, isDefaultWorkflowName } from '../lib/defaultWorkflows.js';
+import { isDefensiveReviewWorkflowName } from '../lib/defensiveReviewWorkflow.js';
 import { lockWorkflowForEdit } from '../lib/workflowLocks.js';
 
 const router = Router();
@@ -79,6 +80,9 @@ export async function replaceWorkflowIfUnused(tx, id, valid) {
   await lockWorkflowForEdit(tx, id);
   const existing = await tx.workflow.findUnique({ where: { id } });
   if (!existing) return { kind: 'not-found' };
+  if (isDefensiveReviewWorkflowName(existing.name) || isDefensiveReviewWorkflowName(valid.name)) {
+    return { kind: 'reserved' };
+  }
   const scanCount = await tx.scan.count({ where: { workflowId: id } });
   if (scanCount > 0) return { kind: 'in-use', scanCount };
 
@@ -97,6 +101,7 @@ export async function deleteWorkflowIfUnused(tx, id) {
   await lockWorkflowForEdit(tx, id);
   const existing = await tx.workflow.findUnique({ where: { id } });
   if (!existing) return { kind: 'not-found' };
+  if (isDefensiveReviewWorkflowName(existing.name)) return { kind: 'reserved' };
   if (isDefaultWorkflowName(existing.name)) return { kind: 'default' };
   const scanCount = await tx.scan.count({ where: { workflowId: id } });
   if (scanCount > 0) return { kind: 'in-use', scanCount };
@@ -112,6 +117,9 @@ export async function deleteWorkflowIfUnused(tx, id) {
 router.post('/', async (req, res, next) => {
   try {
     const valid = validateWorkflow(req.body);
+    if (isDefensiveReviewWorkflowName(valid.name)) {
+      throw new ValidationError([{ field: 'name', message: 'This workflow name is reserved for two-commit reviews.' }]);
+    }
     const workflow = await persistWorkflow(valid);
     res.status(201).json(await assembleWorkflow(workflow));
   } catch (e) {
@@ -128,6 +136,9 @@ router.put('/:id', async (req, res, next) => {
     const valid = validateWorkflow(req.body);
     const result = await prisma.$transaction((tx) => replaceWorkflowIfUnused(tx, id, valid));
     if (result.kind === 'not-found') return res.status(404).json({ error: 'Workflow not found.' });
+    if (result.kind === 'reserved') {
+      return res.status(409).json({ error: 'The defensive review workflow is managed by Two commits.' });
+    }
     if (result.kind === 'in-use') {
       return res.status(409).json(workflowInUseResponse(result.scanCount));
     }
@@ -144,6 +155,9 @@ router.delete('/:id', async (req, res, next) => {
     const id = BigInt(req.params.id);
     const result = await prisma.$transaction((tx) => deleteWorkflowIfUnused(tx, id));
     if (result.kind === 'not-found') return res.status(404).json({ error: 'Workflow not found.' });
+    if (result.kind === 'reserved') {
+      return res.status(409).json({ error: 'The defensive review workflow is managed by Two commits.' });
+    }
     if (result.kind === 'default') return res.status(409).json({ error: 'Default workflows cannot be deleted.' });
     if (result.kind === 'in-use') {
       return res.status(409).json({ error: `Cannot delete: ${result.scanCount} scan(s) use this workflow.` });

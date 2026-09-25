@@ -55,6 +55,7 @@ test('commit review validation accepts only pinned comparison fields', () => {
   });
   assert.deepEqual(valid, {
     comparisonMode: 'commits',
+    reviewKind: 'quick',
     repoKind: 'remote',
     repoFull: 'org/repo',
     baseCommitSha: 'a'.repeat(40),
@@ -79,6 +80,34 @@ test('commit review validation accepts only pinned comparison fields', () => {
         error.errors.some((item) => item.field === field && item.message.includes('not supported'))
       )
   );
+
+  const workflow = validateCommitDiffScan({
+    comparison_mode: 'commits',
+    review_kind: 'workflow',
+    repo_kind: 'remote',
+    repo_full: 'org/repo',
+    base_commit_sha: 'a'.repeat(40),
+    commit_sha: 'b'.repeat(40),
+  });
+  assert.equal(workflow.reviewKind, 'workflow');
+  for (const reviewFields of [
+    { review_kind: 'other' },
+    { reviewKind: null },
+    { review_kind: 'quick', reviewKind: 'workflow' },
+  ]) {
+    assert.throws(
+      () =>
+        validateCommitDiffScan({
+          comparison_mode: 'commits',
+          repo_kind: 'remote',
+          repo_full: 'org/repo',
+          base_commit_sha: 'a'.repeat(40),
+          commit_sha: 'b'.repeat(40),
+          ...reviewFields,
+        }),
+      (error) => error instanceof ValidationError && error.errors.some((item) => item.field === 'review_kind')
+    );
+  }
 });
 
 test('generation and scan model selections share normalization rules', () => {

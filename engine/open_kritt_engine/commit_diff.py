@@ -385,6 +385,123 @@ def _probe_blob(
     )
 
 
+def _tree_manifest(
+    repo_dir: str | os.PathLike[str],
+    tree: str,
+    deadline: float,
+    location: _GitLocation | None,
+) -> dict[bytes, tuple[str, str, str]]:
+    output = _run_git(
+        repo_dir,
+        ["ls-tree", "-r", "-z", "--full-tree", tree],
+        stdout_limit=_MAX_FILES_LIMIT * 8400 + 1,
+        deadline=deadline,
+        location=location,
+    )
+    entries = output.split(b"\0")
+    if entries[-1] != b"":
+        raise CommitDiffError("Git returned incomplete context tree metadata")
+    manifest: dict[bytes, tuple[str, str, str]] = {}
+    for entry in entries[:-1]:
+        metadata, separator, path = entry.partition(b"\t")
+        parts = metadata.split(b" ")
+        if not separator or not path or len(parts) != 3:
+            raise CommitDiffError("Git returned invalid context tree metadata")
+        try:
+            mode, kind, object_id = (part.decode("ascii") for part in parts)
+        except UnicodeDecodeError as exc:
+            raise CommitDiffError("Git returned invalid context tree metadata") from exc
+        if not _FULL_COMMIT_ID_RE.fullmatch(object_id) or path in manifest:
+            raise CommitDiffError("Git returned invalid context tree metadata")
+        manifest[path] = (mode, kind, object_id)
+        if len(manifest) > _MAX_FILES_LIMIT:
+            raise CommitDiffError("context tree manifest exceeds the 1000-file limit")
+    return manifest
+
+
+def _context_sources(
+    repo_dir: str | os.PathLike[str],
+    base_tree: str,
+    head_tree: str,
+    changes: list[_Change],
+    files: list[dict],
+    sizes: dict[str, int],
+    blobs: dict[str, bytes],
+    binary_objects: set[str],
+    processed_bytes: int,
+    deadline: float,
+    location: _GitLocation | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    suffixes = {
+        suffix.encode("utf-8")
+        for item in files
+        for path in (item["base_path"], item["head_path"])
+        if path and (suffix := Path(path).suffix)
+    }
+    if not suffixes:
+        return [], []
+
+    base_manifest = _tree_manifest(repo_dir, base_tree, deadline, location)
+    head_manifest = _tree_manifest(repo_dir, head_tree, deadline, location)
+    changed_paths = {path for change in changes for path in (change.old_path, change.new_path) if path}
+    sources: list[dict[str, str]] = []
+    unreviewed: list[dict[str, str]] = []
+    for path in sorted(base_manifest.keys() & head_manifest.keys()):
+        if path in changed_paths or not any(path.endswith(suffix) for suffix in suffixes):
+            continue
+        base_entry = base_manifest[path]
+        if base_entry != head_manifest[path]:
+            continue
+        mode, kind, object_id = base_entry
+        display_path = _display_path(path)
+        reason = None
+        if not _is_utf8(path):
+            reason = "path is not valid UTF-8"
+        elif mode == "120000":
+            reason = "symlink context is unsupported"
+        elif mode == "160000":
+            reason = "submodule context is unsupported"
+        elif mode not in {"100644", "100755"} or kind != "blob":
+            reason = "file type context is unsupported"
+        if reason:
+            unreviewed.append({"path": display_path, "reason": reason})
+            continue
+
+        if object_id not in sizes:
+            size = _object_size(repo_dir, object_id, deadline, location)
+            sizes[object_id] = size
+            if processed_bytes + min(size, _BINARY_PROBE_BYTES) > _MAX_SOURCE_PROCESSING_BYTES:
+                raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+            probe = _probe_blob(repo_dir, object_id, size, deadline, location)
+            processed_bytes += len(probe)
+            if b"\0" in probe:
+                binary_objects.add(object_id)
+            elif size <= _BINARY_PROBE_BYTES:
+                blobs[object_id] = probe
+        if object_id in binary_objects:
+            unreviewed.append({"path": display_path, "reason": "binary context is unsupported"})
+            continue
+        if object_id not in blobs:
+            size = sizes[object_id]
+            if size > _MAX_SOURCE_BLOB_BYTES:
+                raise CommitDiffError("source object exceeds the 1 MiB processing limit")
+            if processed_bytes + size > _MAX_SOURCE_PROCESSING_BYTES:
+                raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+            blobs[object_id] = _read_blob(repo_dir, object_id, size, deadline, location)
+            processed_bytes += size
+        content = blobs[object_id]
+        if b"\0" in content:
+            unreviewed.append({"path": display_path, "reason": "binary context is unsupported"})
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            unreviewed.append({"path": display_path, "reason": "context text is not valid UTF-8"})
+            continue
+        sources.append({"path": display_path, "base": text, "head": text})
+    return sources, unreviewed
+
+
 def _source_lines(text: str) -> list[str]:
     if not text:
         return []
@@ -642,11 +759,20 @@ def collect_commit_diff(
     max_bytes: int = 120_000,
     max_files: int = 100,
     batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
 ) -> dict:
     """Compare explicit committed object IDs in an existing Git directory."""
 
     return _collect_commit_diff(
-        repo_dir, base_commit, head_commit, max_bytes=max_bytes, max_files=max_files, batch_bytes=batch_bytes
+        repo_dir,
+        base_commit,
+        head_commit,
+        max_bytes=max_bytes,
+        max_files=max_files,
+        batch_bytes=batch_bytes,
+        include_sources=include_sources,
+        include_context=include_context,
     )
 
 
@@ -659,6 +785,8 @@ def collect_local_commit_diff(
     max_bytes: int = 120_000,
     max_files: int = 100,
     batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
 ) -> dict:
     """Compare commits from a repository pinned beneath a configured local root.
 
@@ -702,6 +830,8 @@ def collect_local_commit_diff(
             max_bytes=max_bytes,
             max_files=max_files,
             batch_bytes=batch_bytes,
+            include_sources=include_sources,
+            include_context=include_context,
             location=location,
         )
     except CommitDiffError:
@@ -722,6 +852,8 @@ def _collect_commit_diff(
     max_bytes: int,
     max_files: int,
     batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
     location: _GitLocation | None = None,
 ) -> dict:
     """Return bounded source changes between two explicit commit object IDs.
@@ -741,6 +873,12 @@ def _collect_commit_diff(
         or not 1 <= batch_bytes <= _MAX_REVIEW_INPUT_BYTES
     ):
         raise CommitDiffError(f"batch_bytes must be between 1 and {_MAX_REVIEW_INPUT_BYTES}")
+    if not isinstance(include_sources, bool):
+        raise CommitDiffError("include_sources must be a boolean")
+    if not isinstance(include_context, bool):
+        raise CommitDiffError("include_context must be a boolean")
+    if include_context and not include_sources:
+        raise CommitDiffError("include_context requires include_sources")
     if location is None and not Path(repo_dir).is_dir():
         raise CommitDiffError("repository directory is unavailable")
 
@@ -766,6 +904,10 @@ def _collect_commit_diff(
         }
         if batch_bytes is not None:
             result["batches"] = []
+        if include_sources:
+            result["sources"] = []
+        if include_context:
+            result["context_unreviewed"] = []
         return result
 
     raw_limit = max_files * 8400 + 1
@@ -850,6 +992,7 @@ def _collect_commit_diff(
         processed_bytes += size
 
     files: list[dict] = []
+    sources: list[dict[str, str]] = []
     patch_parts: list[str] = []
     batch_sources: list[tuple[dict, list[str], list[str], difflib.SequenceMatcher]] = []
     for change in candidates:
@@ -898,6 +1041,8 @@ def _collect_commit_diff(
             "head_changed_lines": _changed_ranges(opcodes, "head"),
         }
         files.append(metadata)
+        if include_sources:
+            sources.append({"path": metadata["path"], "base": old_text, "head": new_text})
         if batch_bytes is not None:
             batch_sources.append((metadata, old_lines, new_lines, matcher))
 
@@ -917,4 +1062,22 @@ def _collect_commit_diff(
         raise CommitDiffError("comparison exceeds the configured review input byte limit")
     if batch_bytes is not None:
         result["batches"] = _build_batches(base, head, batch_sources, batch_bytes)
+    if include_context:
+        context_sources, context_unreviewed = _context_sources(
+            repo_dir,
+            base_tree,
+            head_tree,
+            changes,
+            files,
+            sizes,
+            blobs,
+            binary_objects,
+            processed_bytes,
+            deadline,
+            location,
+        )
+        sources.extend(context_sources)
+        result["context_unreviewed"] = context_unreviewed
+    if include_sources:
+        result["sources"] = sources
     return result

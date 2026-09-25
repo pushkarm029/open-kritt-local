@@ -157,8 +157,10 @@ def _remote_repository(repo_full, directory, github_token, commits):
                 raise ValueError("Could not fetch the requested GitHub commits. Check access and retry.") from exc
 
 
-def prepare_diff(scan, config):
+def prepare_diff(scan, config, *, include_sources=False, include_context=False):
     limits = {"max_files": 1000, "max_bytes": 8 * 1024 * 1024, "batch_bytes": 120_000}
+    if include_sources:
+        limits.update(include_sources=True, include_context=include_context)
     if scan.get("repo_kind") == "local":
         return collect_local_commit_diff(
             os.getenv("LOCAL_REPOS_PATH", "/local_repos"),
