@@ -895,6 +895,82 @@ function normalizeRepoRef(raw, localNames, push, prefix) {
   return { kind, repoFull, commitSha: LOCAL_SNAPSHOT_REVISION };
 }
 
+const COMMIT_ID_RE = /^[0-9a-fA-F]{7,64}$/;
+
+export function validateCommitDiffScan(body, { localNames = null } = {}) {
+  const errors = [];
+  const push = (field, message) => errors.push({ field, message });
+  const supportedFields = new Set([
+    'comparison_mode',
+    'comparisonMode',
+    'repo_kind',
+    'repoKind',
+    'repo_full',
+    'repoFull',
+    'base_commit_sha',
+    'baseCommitSha',
+    'commit_sha',
+    'commitSha',
+    'review_kind',
+    'reviewKind',
+    'launchPolicy',
+    'launch_policy',
+  ]);
+  for (const field of Object.keys(body || {})) {
+    if (!supportedFields.has(field)) push(field, 'This field is not supported for two-commit reviews.');
+  }
+  const mode = (body?.comparison_mode ?? body?.comparisonMode ?? '').toString().trim();
+  if (mode !== 'commits') {
+    push('comparison_mode', 'Comparison mode must be "commits".');
+  }
+  const snakeReviewKind = body?.review_kind;
+  const camelReviewKind = body?.reviewKind;
+  const reviewKind =
+    snakeReviewKind === undefined ? (camelReviewKind === undefined ? 'quick' : camelReviewKind) : snakeReviewKind;
+  if (
+    (snakeReviewKind !== undefined && camelReviewKind !== undefined && snakeReviewKind !== camelReviewKind) ||
+    !['quick', 'workflow'].includes(reviewKind)
+  ) {
+    push('review_kind', 'Review kind must be "quick" or "workflow".');
+  }
+
+  const kind = (body?.repo_kind ?? body?.repoKind ?? 'remote').toString().trim();
+  const rawRepo = (body?.repo_full ?? body?.repoFull ?? '').toString().trim();
+  let repoFull = rawRepo;
+  if (!REPO_KINDS.includes(kind)) {
+    push('repo_kind', `Repo kind must be one of: ${REPO_KINDS.join(', ')}.`);
+  } else if (kind === 'remote') {
+    repoFull = normalizeGithubRepo(rawRepo);
+    if (!repoFull) push('repo_full', 'A repository is required.');
+    else if (!isValidGithubRepoInput(repoFull)) {
+      push('repo_full', 'Use a GitHub repo id or URL, e.g. org/repo or https://github.com/org/repo.');
+    }
+  } else {
+    if (!repoFull) push('repo_full', 'Select a local repository.');
+    else if (localNames && !localNames.has(repoFull)) {
+      push('repo_full', `Local repository "${repoFull}" was not found.`);
+    }
+  }
+
+  const baseCommitSha = (body?.base_commit_sha ?? body?.baseCommitSha ?? '').toString().trim();
+  const commitSha = (body?.commit_sha ?? body?.commitSha ?? '').toString().trim();
+  if (!COMMIT_ID_RE.test(baseCommitSha)) {
+    push('base_commit_sha', 'Base commit must be a hexadecimal commit id with at least 7 characters.');
+  }
+  if (!COMMIT_ID_RE.test(commitSha)) {
+    push('commit_sha', 'Head commit must be a hexadecimal commit id with at least 7 characters.');
+  }
+  if (errors.length) throw new ValidationError(errors);
+  return {
+    comparisonMode: 'commits',
+    reviewKind,
+    repoKind: kind,
+    repoFull,
+    baseCommitSha: baseCommitSha.toLowerCase(),
+    commitSha: commitSha.toLowerCase(),
+  };
+}
+
 export function validateScan(body, { localNames = null } = {}) {
   const errors = [];
   const push = (field, message) => errors.push({ field, message });

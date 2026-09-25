@@ -297,12 +297,16 @@ function NewScanDialog({ onClose }) {
                       const modelOverrideCount = Object.keys(scan.modelOverrides || {}).length;
                       const detail = [
                         `#${scan.id}`,
-                        scan.workflowName,
+                        scan.comparisonMode === 'commits' ? 'Two-commit review' : scan.workflowName,
                         scan.model,
                         modelOverrideCount
                           ? `${modelOverrideCount} depth override${modelOverrideCount === 1 ? '' : 's'}`
                           : null,
-                        scan.repoKind === 'local' ? 'local snapshot' : null,
+                        scan.repoKind === 'local'
+                          ? scan.comparisonMode === 'commits'
+                            ? 'local Git'
+                            : 'local snapshot'
+                          : null,
                         scan.age ? `${scan.age} ago` : null,
                       ]
                         .filter(Boolean)
@@ -485,10 +489,10 @@ export function ScanCard({ scan, to, onResume, onToggleError, onDelete, busy, er
         </div>
       </div>
       <div className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 6 }}>
-        {scan.workflowName} · {scan.model}
+        {scan.comparisonMode === 'commits' ? 'Two-commit review' : scan.workflowName} · {scan.model}
         {modelOverrideCount
           ? ` · ${modelOverrideCount} depth override${modelOverrideCount === 1 ? '' : 's'}`
-          : ''} · {scan.repoKind === 'local' ? 'local snapshot' : scan.commitShort}
+          : ''} · {scan.repoKind === 'local' && scan.comparisonMode !== 'commits' ? 'local snapshot' : scan.commitShort}
       </div>
 
       {providerAutoscale && (

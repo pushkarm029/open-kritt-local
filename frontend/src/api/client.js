@@ -127,6 +127,10 @@ async function download(path, fallbackFilename) {
 }
 
 export const api = {
+  selfHostedConfig: () => request('/accounts/self-hosted/config'),
+  saveSelfHostedConfig: (body) => request('/accounts/self-hosted/config', { method: 'PUT', body }),
+  checkSelfHosted: () => request('/accounts/self-hosted/check', { method: 'POST' }),
+  selfHostedCheck: (id) => request(`/accounts/self-hosted/check/${encodeURIComponent(id)}`),
   // overview
   overview: () => request('/overview'),
   // non-secret engine runtime settings

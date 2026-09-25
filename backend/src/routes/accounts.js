@@ -15,6 +15,14 @@ import {
   saveManagedProviderCredential,
   validateProviderCredential,
 } from '../lib/providerCredentials.js';
+import {
+  createSelfHostedCheckRequest,
+  readSelfHostedCheckResult,
+  readSelfHostedConfig,
+  validateSelfHostedConfig,
+  writeSelfHostedConfig,
+} from '../lib/selfHostedConfig.js';
+import { isModelProviderConfigured } from '../lib/modelProviders.js';
 
 export function createAccountsRouter({
   getOverview = getAccountsOverview,
@@ -26,6 +34,10 @@ export function createAccountsRouter({
   consumeReset = consumeCodexManualReset,
   deepseek = createDeepSeekClient(),
   setActive = setAccountActive,
+  readSelfHosted = readSelfHostedConfig,
+  writeSelfHosted = writeSelfHostedConfig,
+  createSelfHostedCheck = createSelfHostedCheckRequest,
+  readSelfHostedCheck = readSelfHostedCheckResult,
 } = {}) {
   const router = Router();
 
@@ -46,6 +58,52 @@ export function createAccountsRouter({
   router.get('/summary', (req, res, next) => {
     try {
       res.json(getSummary());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/self-hosted/config', async (req, res, next) => {
+    try {
+      const config = await readSelfHosted();
+      res.json({
+        baseUrl: config.baseUrl,
+        model: config.model,
+        configured: Boolean(config.baseUrl && config.model),
+        active: isModelProviderConfigured('self_hosted'),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.put('/self-hosted/config', async (req, res, next) => {
+    try {
+      const config = validateSelfHostedConfig(req.body || {});
+      const saved = await writeSelfHosted(config);
+      res.json({ ...saved, configured: true });
+    } catch (error) {
+      if (error?.status === 422 && Array.isArray(error.errors)) {
+        return res.status(422).json({ error: 'Validation failed.', errors: error.errors });
+      }
+      next(error);
+    }
+  });
+
+  router.post('/self-hosted/check', async (req, res, next) => {
+    try {
+      res.status(202).json(await createSelfHostedCheck());
+    } catch (error) {
+      if (error?.status === 422 && Array.isArray(error.errors)) {
+        return res.status(422).json({ error: 'Validation failed.', errors: error.errors });
+      }
+      next(error);
+    }
+  });
+
+  router.get('/self-hosted/check/:id', async (req, res, next) => {
+    try {
+      res.json(await readSelfHostedCheck(req.params.id));
     } catch (error) {
       next(error);
     }

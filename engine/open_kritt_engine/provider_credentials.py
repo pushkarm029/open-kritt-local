@@ -12,6 +12,7 @@ PROVIDER_ENV_KEYS = {
     "openrouter": "OPENROUTER_API_KEY",
     "xai": "XAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "self_hosted": "SELF_HOSTED_API_KEY",
 }
 MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024
 _CREDENTIAL_WRITE_LOCK = threading.Lock()

@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 
 import { prismaUniqueConflict } from '../src/app.js';
 import { DEFAULT_WORKFLOW_NAMES } from '../src/lib/defaultWorkflows.js';
+import { DEFENSIVE_REVIEW_WORKFLOW_NAME } from '../src/lib/defensiveReviewWorkflow.js';
 import { validateScanJobLimit, ValidationError } from '../src/lib/validation.js';
 import { agentSkillMutationState, countAgentSkillScanUsage } from '../src/routes/agentSkills.js';
 import { summarizeCanonicalFindings } from '../src/routes/overview.js';
@@ -18,6 +19,7 @@ import {
   lockScanConfigurationResources,
   patchScanIfPresent,
   requiredScanExtraKeys,
+  scanComparisonMode,
   scanLaunchDecision,
   validateScanRuntimeUpdate,
   validateSupplementalPostScriptRequest,
@@ -37,6 +39,22 @@ test('scan launch choices map immediate work to pending and queued work to queue
     () => scanLaunchDecision({ launchPolicy: 'later' }, 1),
     (error) => error instanceof ValidationError && error.errors[0]?.field === 'launchPolicy'
   );
+});
+
+test('explicit comparison modes cannot fall through to a different scan flow', () => {
+  assert.equal(scanComparisonMode({}), 'full_repository');
+  assert.equal(scanComparisonMode({ comparison_mode: 'full_repository' }), 'full_repository');
+  assert.equal(scanComparisonMode({ comparisonMode: 'commits' }), 'commits');
+  for (const body of [
+    { comparison_mode: 'commit' },
+    { comparisonMode: null },
+    { comparison_mode: 'full_repository', comparisonMode: 'commits' },
+  ]) {
+    assert.throws(
+      () => scanComparisonMode(body),
+      (error) => error instanceof ValidationError && error.errors[0]?.field === 'comparison_mode'
+    );
+  }
 });
 
 test('referenced workflows cannot be rewritten or have their steps deleted', async () => {
@@ -63,6 +81,26 @@ test('referenced workflows cannot be rewritten or have their steps deleted', asy
   });
 
   assert.deepEqual(result, { kind: 'in-use', scanCount: 3 });
+  assert.deepEqual(mutations, []);
+});
+
+test('reserved defensive review workflow cannot be replaced or deleted', async () => {
+  const mutations = [];
+  const tx = {
+    $queryRaw: async () => [],
+    workflow: {
+      findUnique: async () => ({ id: 7n, name: DEFENSIVE_REVIEW_WORKFLOW_NAME, stepIds: [10n] }),
+      update: async () => mutations.push('workflow.update'),
+      delete: async () => mutations.push('workflow.delete'),
+    },
+    scan: { count: async () => mutations.push('scan.count') },
+    step: {
+      create: async () => mutations.push('step.create'),
+      deleteMany: async () => mutations.push('step.deleteMany'),
+    },
+  };
+  assert.deepEqual(await replaceWorkflowIfUnused(tx, 7n, { name: 'Renamed' }), { kind: 'reserved' });
+  assert.deepEqual(await deleteWorkflowIfUnused(tx, 7n), { kind: 'reserved' });
   assert.deepEqual(mutations, []);
 });
 

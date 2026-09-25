@@ -1,3 +1,4 @@
+import { CommitReviewResults } from './CommitReview.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api/client.js';
@@ -304,6 +305,7 @@ export default function ScanDetail() {
       </div>
     );
   if (!scan) return null;
+  if (scan.comparisonMode === 'commits') return <CommitReviewResults scan={scan} reload={reload} />;
 
   const list = vulns || [];
   const extraEntries = scan.extra && typeof scan.extra === 'object' ? Object.entries(scan.extra) : [];

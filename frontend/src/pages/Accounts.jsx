@@ -1,3 +1,4 @@
+import SelfHostedCard from '../components/SelfHostedCard.jsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '../api/client.js';
@@ -223,41 +224,51 @@ export default function Accounts() {
 
           <ProviderVisibility
             configuredProviders={data.providers
-              .filter((provider) => provider.configured)
+              .filter((provider) => provider.configured && provider.id !== 'self_hosted')
               .map((provider) => provider.id)}
           />
           <div className="account-provider-grid">
             {data.providers
-              .filter((provider) => visible.includes(provider.id))
-              .map((provider) => (
-                <ProviderCard
-                  key={provider.id}
-                  provider={provider}
-                  credentialRevision={credentialRevision}
-                  onEdit={() => setEditing(provider)}
-                  onEditKey={
-                    provider.management === 'login' && provider.canManageKey ? () => setEditingKey(provider) : null
-                  }
-                  onRemove={() => remove(provider)}
-                  onRemoveAccount={(account) => removeLoginAccount(provider, account)}
-                  onStartWeeklyUsage={startWeeklyUsage}
-                  onUseManualReset={useManualReset}
-                  onToggleActive={(account) => toggleActive(provider, account)}
-                  updatingActive={
-                    updatingActive ||
-                    refreshing ||
-                    loadingProviders.size > 0 ||
-                    Boolean(removingAccount) ||
-                    startingUsage.size > 0 ||
-                    resettingUsage.size > 0
-                  }
-                  removingAccount={removingAccount}
-                  startingUsage={startingUsage}
-                  resettingUsage={resettingUsage}
-                  loading={loadingProviders.has(provider.id)}
-                  loadError={providerErrors[provider.id]}
-                />
-              ))}
+              .filter((provider) => provider.id === 'self_hosted' || visible.includes(provider.id))
+              .map((provider) =>
+                provider.id === 'self_hosted' ? (
+                  <SelfHostedCard
+                    key={provider.id}
+                    provider={provider}
+                    onToggleActive={(account) => toggleActive(provider, account)}
+                    updatingActive={updatingActive}
+                    onSaved={() => load()}
+                  />
+                ) : (
+                  <ProviderCard
+                    key={provider.id}
+                    provider={provider}
+                    credentialRevision={credentialRevision}
+                    onEdit={() => setEditing(provider)}
+                    onEditKey={
+                      provider.management === 'login' && provider.canManageKey ? () => setEditingKey(provider) : null
+                    }
+                    onRemove={() => remove(provider)}
+                    onRemoveAccount={(account) => removeLoginAccount(provider, account)}
+                    onStartWeeklyUsage={startWeeklyUsage}
+                    onUseManualReset={useManualReset}
+                    onToggleActive={(account) => toggleActive(provider, account)}
+                    updatingActive={
+                      updatingActive ||
+                      refreshing ||
+                      loadingProviders.size > 0 ||
+                      Boolean(removingAccount) ||
+                      startingUsage.size > 0 ||
+                      resettingUsage.size > 0
+                    }
+                    removingAccount={removingAccount}
+                    startingUsage={startingUsage}
+                    resettingUsage={resettingUsage}
+                    loading={loadingProviders.has(provider.id)}
+                    loadError={providerErrors[provider.id]}
+                  />
+                )
+              )}
           </div>
         </>
       )}

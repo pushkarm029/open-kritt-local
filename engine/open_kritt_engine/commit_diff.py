@@ -1,0 +1,1083 @@
+"""Read-only, bounded comparison of two committed Git trees."""
+
+from __future__ import annotations
+
+import difflib
+import json
+import os
+import re
+import selectors
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class CommitDiffError(ValueError):
+    """A safe, user-facing error while collecting a commit comparison."""
+
+    def __init__(self, message: str, *, field: str | None = None):
+        super().__init__(message)
+        self.field = field
+
+
+_COMMIT_ID_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_FULL_COMMIT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_ZERO_OBJECT_ID_RE = re.compile(r"^0+$")
+_MAX_BYTES_LIMIT = 8 * 1024 * 1024
+_MAX_FILES_LIMIT = 1000
+_MAX_REVIEW_INPUT_BYTES = 120_000
+_BINARY_PROBE_BYTES = 8192
+_MAX_SOURCE_BLOB_BYTES = 1024 * 1024
+_MAX_SOURCE_PROCESSING_BYTES = 8 * 1024 * 1024
+_COMMAND_TIMEOUT_SECONDS = 10.0
+_TOTAL_TIMEOUT_SECONDS = 30.0
+_STDERR_LIMIT = 4096
+
+
+@dataclass(frozen=True)
+class _Change:
+    status_code: str
+    old_mode: str
+    new_mode: str
+    old_object: str
+    new_object: str
+    old_path: bytes
+    new_path: bytes
+
+
+@dataclass(frozen=True)
+class _GitLocation:
+    git_dir_fd: int
+
+
+_FD_EXEC_BOOTSTRAP = "import os,sys; os.fchdir(int(sys.argv[1])); os.execv(sys.argv[2],sys.argv[2:])"
+
+
+def _git_environment() -> dict[str, str]:
+    """Return a deliberately small environment without user Git settings."""
+
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.devnull,
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+
+def _run_git(
+    repo_dir: str | os.PathLike[str],
+    args: list[str],
+    *,
+    stdout_limit: int,
+    deadline: float,
+    location: _GitLocation | None = None,
+    prefix_only: bool = False,
+) -> bytes:
+    git = shutil.which("git")
+    if not git:
+        raise CommitDiffError("Git is unavailable")
+
+    command = [
+        git,
+        "--no-pager",
+        "--no-replace-objects",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        "-c",
+        "core.attributesFile=/dev/null",
+        *args,
+    ]
+    if location is not None:
+        command = [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            _FD_EXEC_BOOTSTRAP,
+            str(location.git_dir_fd),
+            *command,
+        ]
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CommitDiffError("Git comparison exceeded its time limit")
+    timeout = min(_COMMAND_TIMEOUT_SECONDS, remaining)
+
+    environment = _git_environment()
+    if location is not None:
+        environment["GIT_DIR"] = "."
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd="/" if location is not None else repo_dir,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            bufsize=0,
+            pass_fds=(location.git_dir_fd,) if location is not None else (),
+        )
+    except (OSError, ValueError) as exc:
+        raise CommitDiffError("could not start Git comparison") from exc
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno()
+    selector = selectors.DefaultSelector()
+    buffers: dict[int, bytearray] = {
+        stdout_fd: bytearray(),
+        stderr_fd: bytearray(),
+    }
+    limits = {
+        stdout_fd: stdout_limit,
+        stderr_fd: _STDERR_LIMIT,
+    }
+    streams = {process.stdout.fileno(): process.stdout, process.stderr.fileno(): process.stderr}
+    try:
+        for fd, stream in streams.items():
+            selector.register(stream, selectors.EVENT_READ, fd)
+
+        while selector.get_map():
+            remaining = min(timeout, deadline - time.monotonic())
+            if remaining <= 0:
+                raise CommitDiffError("Git comparison exceeded its time limit")
+            for key, _ in selector.select(min(remaining, 0.2)):
+                fd = key.data
+                extra_byte = 0 if prefix_only and fd == stdout_fd else 1
+                chunk = os.read(fd, min(65536, limits[fd] - len(buffers[fd]) + extra_byte))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffers[fd].extend(chunk)
+                if len(buffers[fd]) > limits[fd]:
+                    raise CommitDiffError("Git comparison output exceeds its configured limit")
+                if prefix_only and fd == stdout_fd and len(buffers[fd]) == limits[fd]:
+                    return bytes(buffers[fd])
+
+        remaining = min(timeout, deadline - time.monotonic())
+        if remaining <= 0:
+            raise CommitDiffError("Git comparison exceeded its time limit")
+        try:
+            return_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise CommitDiffError("Git comparison exceeded its time limit") from exc
+        if return_code != 0:
+            raise CommitDiffError("Git could not read the requested commit data")
+        return bytes(buffers[stdout_fd])
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for stream in streams.values():
+            if not stream.closed:
+                stream.close()
+
+
+def _small_git_output(
+    repo_dir: str | os.PathLike[str],
+    args: list[str],
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> str:
+    output = _run_git(repo_dir, args, stdout_limit=256, deadline=deadline, location=location)
+    try:
+        return output.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise CommitDiffError("Git returned invalid object metadata") from exc
+
+
+def _resolve_commit(
+    repo_dir: str | os.PathLike[str],
+    value: str,
+    label: str,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> str:
+    if not isinstance(value, str) or not _COMMIT_ID_RE.fullmatch(value):
+        raise CommitDiffError(f"{label} must be a hexadecimal commit object ID")
+    prefix = value.lower()
+    matches = _run_git(
+        repo_dir,
+        ["rev-parse", f"--disambiguate={prefix}"],
+        stdout_limit=4096,
+        deadline=deadline,
+        location=location,
+    )
+    object_ids = [line.decode("ascii", errors="ignore") for line in matches.splitlines()]
+    object_ids = [item for item in object_ids if _FULL_COMMIT_ID_RE.fullmatch(item)]
+    if not object_ids:
+        raise CommitDiffError(f"{label} commit object was not found")
+    if len(object_ids) != 1:
+        raise CommitDiffError(f"{label} commit object ID is ambiguous")
+    object_id = object_ids[0]
+    if len(prefix) == len(object_id) and prefix != object_id:
+        raise CommitDiffError(f"{label} commit object was not found")
+    if not object_id.startswith(prefix):
+        raise CommitDiffError(f"{label} commit object was not found")
+    object_type = _small_git_output(repo_dir, ["cat-file", "-t", object_id], deadline, location)
+    if object_type != "commit":
+        raise CommitDiffError(f"{label} object is not a commit")
+    return object_id
+
+
+def _tree_id(
+    repo_dir: str | os.PathLike[str],
+    commit: str,
+    label: str,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> str:
+    tree = _small_git_output(repo_dir, ["rev-parse", "--verify", f"{commit}^{{tree}}"], deadline, location)
+    if not _FULL_COMMIT_ID_RE.fullmatch(tree):
+        raise CommitDiffError(f"could not read the {label} commit tree")
+    return tree
+
+
+def _parse_raw_diff(output: bytes) -> list[_Change]:
+    fields = output.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    changes: list[_Change] = []
+    index = 0
+    while index < len(fields):
+        metadata = fields[index].split()
+        index += 1
+        if len(metadata) != 5 or not metadata[0].startswith(b":"):
+            raise CommitDiffError("Git returned invalid change metadata")
+        try:
+            old_mode = metadata[0][1:].decode("ascii")
+            new_mode = metadata[1].decode("ascii")
+            old_object = metadata[2].decode("ascii")
+            new_object = metadata[3].decode("ascii")
+            status = metadata[4].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise CommitDiffError("Git returned invalid change metadata") from exc
+        path_count = 2 if status[:1] in {"R", "C"} else 1
+        if index + path_count > len(fields):
+            raise CommitDiffError("Git returned incomplete path metadata")
+        first_path = fields[index]
+        index += 1
+        second_path = fields[index] if path_count == 2 else first_path
+        if path_count == 2:
+            index += 1
+        if status.startswith("D"):
+            old_path, new_path = first_path, b""
+        elif status.startswith("A"):
+            old_path, new_path = b"", first_path
+        elif path_count == 2:
+            old_path, new_path = first_path, second_path
+        else:
+            old_path = new_path = first_path
+        changes.append(_Change(status, old_mode, new_mode, old_object, new_object, old_path, new_path))
+    return changes
+
+
+def _display_path(path: bytes) -> str:
+    return path.decode("utf-8", errors="backslashreplace")
+
+
+def _status_name(change: _Change) -> str | None:
+    if change.status_code.startswith("A"):
+        return "added"
+    if change.status_code.startswith("D"):
+        return "deleted"
+    if change.status_code.startswith("R"):
+        return "renamed"
+    if change.status_code == "M":
+        return "modified"
+    return None
+
+
+def _unsupported_reason(change: _Change) -> str | None:
+    if change.old_mode == "160000" or change.new_mode == "160000":
+        return "submodule changes are unsupported"
+    if change.old_mode == "120000" or change.new_mode == "120000":
+        return "symlink changes are unsupported"
+    if (
+        change.status_code.startswith("T")
+        or change.old_mode not in {"000000", "100644", "100755"}
+        or (change.new_mode not in {"000000", "100644", "100755"})
+    ):
+        return "file type changes are unsupported"
+    if _status_name(change) is None:
+        return "change type is unsupported"
+    if (change.old_path and not _is_utf8(change.old_path)) or (change.new_path and not _is_utf8(change.new_path)):
+        return "path is not valid UTF-8"
+    return None
+
+
+def _is_utf8(value: bytes) -> bool:
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _object_size(
+    repo_dir: str | os.PathLike[str],
+    object_id: str,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> int:
+    if _ZERO_OBJECT_ID_RE.fullmatch(object_id):
+        return 0
+    value = _small_git_output(repo_dir, ["cat-file", "-s", object_id], deadline, location)
+    if not value.isdecimal():
+        raise CommitDiffError("Git returned invalid object size metadata")
+    return int(value)
+
+
+def _read_blob(
+    repo_dir: str | os.PathLike[str],
+    object_id: str,
+    expected_size: int,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> bytes:
+    if _ZERO_OBJECT_ID_RE.fullmatch(object_id):
+        return b""
+    content = _run_git(
+        repo_dir,
+        ["cat-file", "blob", object_id],
+        stdout_limit=expected_size,
+        deadline=deadline,
+        location=location,
+    )
+    if len(content) != expected_size:
+        raise CommitDiffError("Git returned an incomplete source object")
+    return content
+
+
+def _probe_blob(
+    repo_dir: str | os.PathLike[str],
+    object_id: str,
+    size: int,
+    deadline: float,
+    location: _GitLocation | None = None,
+) -> bytes:
+    if size <= _BINARY_PROBE_BYTES:
+        return _read_blob(repo_dir, object_id, size, deadline, location)
+    return _run_git(
+        repo_dir,
+        ["cat-file", "blob", object_id],
+        stdout_limit=_BINARY_PROBE_BYTES,
+        deadline=deadline,
+        location=location,
+        prefix_only=True,
+    )
+
+
+def _tree_manifest(
+    repo_dir: str | os.PathLike[str],
+    tree: str,
+    deadline: float,
+    location: _GitLocation | None,
+) -> dict[bytes, tuple[str, str, str]]:
+    output = _run_git(
+        repo_dir,
+        ["ls-tree", "-r", "-z", "--full-tree", tree],
+        stdout_limit=_MAX_FILES_LIMIT * 8400 + 1,
+        deadline=deadline,
+        location=location,
+    )
+    entries = output.split(b"\0")
+    if entries[-1] != b"":
+        raise CommitDiffError("Git returned incomplete context tree metadata")
+    manifest: dict[bytes, tuple[str, str, str]] = {}
+    for entry in entries[:-1]:
+        metadata, separator, path = entry.partition(b"\t")
+        parts = metadata.split(b" ")
+        if not separator or not path or len(parts) != 3:
+            raise CommitDiffError("Git returned invalid context tree metadata")
+        try:
+            mode, kind, object_id = (part.decode("ascii") for part in parts)
+        except UnicodeDecodeError as exc:
+            raise CommitDiffError("Git returned invalid context tree metadata") from exc
+        if not _FULL_COMMIT_ID_RE.fullmatch(object_id) or path in manifest:
+            raise CommitDiffError("Git returned invalid context tree metadata")
+        manifest[path] = (mode, kind, object_id)
+        if len(manifest) > _MAX_FILES_LIMIT:
+            raise CommitDiffError("context tree manifest exceeds the 1000-file limit")
+    return manifest
+
+
+def _context_sources(
+    repo_dir: str | os.PathLike[str],
+    base_tree: str,
+    head_tree: str,
+    changes: list[_Change],
+    files: list[dict],
+    sizes: dict[str, int],
+    blobs: dict[str, bytes],
+    binary_objects: set[str],
+    processed_bytes: int,
+    deadline: float,
+    location: _GitLocation | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    suffixes = {
+        suffix.encode("utf-8")
+        for item in files
+        for path in (item["base_path"], item["head_path"])
+        if path and (suffix := Path(path).suffix)
+    }
+    if not suffixes:
+        return [], []
+
+    base_manifest = _tree_manifest(repo_dir, base_tree, deadline, location)
+    head_manifest = _tree_manifest(repo_dir, head_tree, deadline, location)
+    changed_paths = {path for change in changes for path in (change.old_path, change.new_path) if path}
+    sources: list[dict[str, str]] = []
+    unreviewed: list[dict[str, str]] = []
+    for path in sorted(base_manifest.keys() & head_manifest.keys()):
+        if path in changed_paths or not any(path.endswith(suffix) for suffix in suffixes):
+            continue
+        base_entry = base_manifest[path]
+        if base_entry != head_manifest[path]:
+            continue
+        mode, kind, object_id = base_entry
+        display_path = _display_path(path)
+        reason = None
+        if not _is_utf8(path):
+            reason = "path is not valid UTF-8"
+        elif mode == "120000":
+            reason = "symlink context is unsupported"
+        elif mode == "160000":
+            reason = "submodule context is unsupported"
+        elif mode not in {"100644", "100755"} or kind != "blob":
+            reason = "file type context is unsupported"
+        if reason:
+            unreviewed.append({"path": display_path, "reason": reason})
+            continue
+
+        if object_id not in sizes:
+            size = _object_size(repo_dir, object_id, deadline, location)
+            sizes[object_id] = size
+            if processed_bytes + min(size, _BINARY_PROBE_BYTES) > _MAX_SOURCE_PROCESSING_BYTES:
+                raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+            probe = _probe_blob(repo_dir, object_id, size, deadline, location)
+            processed_bytes += len(probe)
+            if b"\0" in probe:
+                binary_objects.add(object_id)
+            elif size <= _BINARY_PROBE_BYTES:
+                blobs[object_id] = probe
+        if object_id in binary_objects:
+            unreviewed.append({"path": display_path, "reason": "binary context is unsupported"})
+            continue
+        if object_id not in blobs:
+            size = sizes[object_id]
+            if size > _MAX_SOURCE_BLOB_BYTES:
+                raise CommitDiffError("source object exceeds the 1 MiB processing limit")
+            if processed_bytes + size > _MAX_SOURCE_PROCESSING_BYTES:
+                raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+            blobs[object_id] = _read_blob(repo_dir, object_id, size, deadline, location)
+            processed_bytes += size
+        content = blobs[object_id]
+        if b"\0" in content:
+            unreviewed.append({"path": display_path, "reason": "binary context is unsupported"})
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            unreviewed.append({"path": display_path, "reason": "context text is not valid UTF-8"})
+            continue
+        sources.append({"path": display_path, "base": text, "head": text})
+    return sources, unreviewed
+
+
+def _source_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _changed_ranges(opcodes: list[tuple[str, int, int, int, int]], side: str) -> list[list[int]]:
+    intervals: list[tuple[int, int]] = []
+    for tag, base_start, base_end, head_start, head_end in opcodes:
+        if tag == "equal":
+            continue
+        start, end = (base_start, base_end) if side == "base" else (head_start, head_end)
+        if end > start:
+            intervals.append((start + 1, end))
+    ranges: list[list[int]] = []
+    for start, end in intervals:
+        if ranges and start <= ranges[-1][1] + 1:
+            ranges[-1][1] = end
+        else:
+            ranges.append([start, end])
+    return ranges
+
+
+def _patch_path(prefix: str, path: str) -> str:
+    value = f"{prefix}/{path}"
+    if any(char in value for char in '\\"\t\r\n') or any(ord(char) < 32 for char in value):
+        return json.dumps(value, ensure_ascii=True)
+    return value
+
+
+def _unified_patch(old_text: str, new_text: str, old_path: str, new_path: str) -> str:
+    lines = list(
+        difflib.unified_diff(
+            _source_lines(old_text),
+            _source_lines(new_text),
+            fromfile=_patch_path("a", old_path),
+            tofile=_patch_path("b", new_path),
+            n=10,
+            lineterm="\n",
+        )
+    )
+    patch: list[str] = []
+    for line in lines:
+        patch.append(line)
+        if not line.endswith("\n"):
+            patch.append("\n\\ No newline at end of file\n")
+    return "".join(patch)
+
+
+@dataclass(frozen=True)
+class _PatchLine:
+    marker: str
+    source: str
+    base_before: int
+    head_before: int
+    base_line: int | None
+    head_line: int | None
+
+
+@dataclass(frozen=True)
+class _FileFragment:
+    metadata: dict
+    hunks: tuple[str, ...]
+
+
+def _serialized_bytes(value: dict) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _range_header(start: int, count: int) -> str:
+    if count == 0:
+        return f"{start},0"
+    if count == 1:
+        return str(start + 1)
+    return f"{start + 1},{count}"
+
+
+def _patch_lines(
+    group: list[tuple[str, int, int, int, int]], base_lines: list[str], head_lines: list[str]
+) -> list[_PatchLine]:
+    lines: list[_PatchLine] = []
+    for tag, base_start, base_end, head_start, head_end in group:
+        if tag == "equal":
+            for base_index, head_index in zip(range(base_start, base_end), range(head_start, head_end), strict=True):
+                lines.append(
+                    _PatchLine(" ", base_lines[base_index], base_index, head_index, base_index + 1, head_index + 1)
+                )
+        else:
+            for base_index in range(base_start, base_end):
+                lines.append(_PatchLine("-", base_lines[base_index], base_index, head_start, base_index + 1, None))
+            for head_index in range(head_start, head_end):
+                lines.append(_PatchLine("+", head_lines[head_index], base_end, head_index, None, head_index + 1))
+    return lines
+
+
+def _render_hunk(lines: list[_PatchLine]) -> str:
+    first = lines[0]
+    base_count = sum(line.marker != "+" for line in lines)
+    head_count = sum(line.marker != "-" for line in lines)
+    header = f"@@ -{_range_header(first.base_before, base_count)} +{_range_header(first.head_before, head_count)} @@\n"
+    body: list[str] = []
+    for line in lines:
+        body.append(line.marker + line.source)
+        if not line.source.endswith("\n"):
+            body.append("\n\\ No newline at end of file\n")
+    return header + "".join(body)
+
+
+def _line_ranges(numbers: list[int]) -> list[list[int]]:
+    ranges: list[list[int]] = []
+    for number in numbers:
+        if ranges and number <= ranges[-1][1] + 1:
+            ranges[-1][1] = max(ranges[-1][1], number)
+        else:
+            ranges.append([number, number])
+    return ranges
+
+
+def _fragment_from_lines(metadata: dict, lines: list[_PatchLine]) -> _FileFragment:
+    item = {
+        **metadata,
+        "base_changed_lines": _line_ranges([line.base_line for line in lines if line.marker == "-"]),
+        "head_changed_lines": _line_ranges([line.head_line for line in lines if line.marker == "+"]),
+    }
+    return _FileFragment(item, (_render_hunk(lines),))
+
+
+def _merge_ranges(first: list[list[int]], second: list[list[int]]) -> list[list[int]]:
+    merged = [part.copy() for part in first]
+    for start, end in second:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _merge_fragments(first: _FileFragment, second: _FileFragment) -> _FileFragment:
+    metadata = {
+        **first.metadata,
+        "base_changed_lines": _merge_ranges(
+            first.metadata["base_changed_lines"], second.metadata["base_changed_lines"]
+        ),
+        "head_changed_lines": _merge_ranges(
+            first.metadata["head_changed_lines"], second.metadata["head_changed_lines"]
+        ),
+    }
+    return _FileFragment(metadata, first.hunks + second.hunks)
+
+
+def _fragment_patch(fragment: _FileFragment) -> str:
+    base_path = fragment.metadata["base_path"] or ""
+    head_path = fragment.metadata["head_path"] or ""
+    return f"--- {_patch_path('a', base_path)}\n+++ {_patch_path('b', head_path)}\n" + "".join(fragment.hunks)
+
+
+def _batch_diff(base: str, head: str, fragments: list[_FileFragment]) -> dict:
+    return {
+        "base_commit": base,
+        "head_commit": head,
+        "patch": "".join(_fragment_patch(fragment) for fragment in fragments),
+        "files": [fragment.metadata for fragment in fragments],
+        "unreviewed": [],
+        "no_changes": False,
+    }
+
+
+def _split_hunk(
+    metadata: dict,
+    lines: list[_PatchLine],
+    base: str,
+    head: str,
+    batch_bytes: int,
+) -> list[_FileFragment]:
+    fragments: list[_FileFragment] = []
+    start = 0
+
+    def fits(begin: int, end: int) -> bool:
+        fragment = _fragment_from_lines(metadata, lines[begin:end])
+        return _serialized_bytes(_batch_diff(base, head, [fragment])) <= batch_bytes
+
+    while start < len(lines):
+        changed = next((index for index in range(start, len(lines)) if lines[index].marker != " "), None)
+        if changed is None:
+            break
+        minimum_end = changed + 1
+        while start < changed and not fits(start, minimum_end):
+            start += 1
+        if not fits(start, minimum_end):
+            raise CommitDiffError("a changed source line or its file metadata exceeds the batch byte limit")
+
+        if fits(start, len(lines)):
+            end = len(lines)
+        else:
+            low, high = minimum_end, len(lines)
+            while low + 1 < high:
+                middle = (low + high) // 2
+                if fits(start, middle):
+                    low = middle
+                else:
+                    high = middle
+            end = low
+        fragments.append(_fragment_from_lines(metadata, lines[start:end]))
+        start = end
+    return fragments
+
+
+def _build_batches(
+    base: str,
+    head: str,
+    sources: list[tuple[dict, list[str], list[str], difflib.SequenceMatcher]],
+    batch_bytes: int,
+) -> list[dict]:
+    fragments: list[_FileFragment] = []
+    for metadata, base_lines, head_lines, matcher in sources:
+        current: _FileFragment | None = None
+        for group in matcher.get_grouped_opcodes(n=10):
+            for part in _split_hunk(metadata, _patch_lines(group, base_lines, head_lines), base, head, batch_bytes):
+                if current is None:
+                    current = part
+                    continue
+                combined = _merge_fragments(current, part)
+                if _serialized_bytes(_batch_diff(base, head, [combined])) <= batch_bytes:
+                    current = combined
+                else:
+                    fragments.append(current)
+                    current = part
+        if current is not None:
+            fragments.append(current)
+
+    batches: list[dict] = []
+    current_batch: list[_FileFragment] = []
+    for fragment in fragments:
+        duplicate_path = any(item.metadata["path"] == fragment.metadata["path"] for item in current_batch)
+        if current_batch and (
+            duplicate_path or _serialized_bytes(_batch_diff(base, head, [*current_batch, fragment])) > batch_bytes
+        ):
+            batches.append(_batch_diff(base, head, current_batch))
+            current_batch = []
+        current_batch.append(fragment)
+    if current_batch:
+        batches.append(_batch_diff(base, head, current_batch))
+    return batches
+
+
+def collect_commit_diff(
+    repo_dir: str | os.PathLike[str],
+    base_commit: str,
+    head_commit: str,
+    *,
+    max_bytes: int = 120_000,
+    max_files: int = 100,
+    batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
+) -> dict:
+    """Compare explicit committed object IDs in an existing Git directory."""
+
+    return _collect_commit_diff(
+        repo_dir,
+        base_commit,
+        head_commit,
+        max_bytes=max_bytes,
+        max_files=max_files,
+        batch_bytes=batch_bytes,
+        include_sources=include_sources,
+        include_context=include_context,
+    )
+
+
+def collect_local_commit_diff(
+    source_root: str | os.PathLike[str],
+    repo_name: str,
+    base_commit: str,
+    head_commit: str,
+    *,
+    max_bytes: int = 120_000,
+    max_files: int = 100,
+    batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
+) -> dict:
+    """Compare commits from a repository pinned beneath a configured local root.
+
+    The configured root may intentionally be a symlink, so it is resolved once.
+    The repository and its ``.git`` directory are opened relative to pinned
+    directory descriptors, then Git receives only inherited descriptor paths.
+    """
+
+    if (
+        not isinstance(repo_name, str)
+        or not repo_name
+        or repo_name in {".", ".."}
+        or "/" in repo_name
+        or "\0" in repo_name
+    ):
+        raise CommitDiffError("repository must be a direct child of the configured local repository root")
+    if os.name != "posix" or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise CommitDiffError("secure local repository access is unavailable on this platform")
+
+    root_fd = repo_fd = git_dir_fd = None
+    try:
+        root = Path(source_root).resolve(strict=True)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(root, directory_flags)
+        repo_fd = os.open(repo_name, directory_flags, dir_fd=root_fd)
+        try:
+            git_info = os.stat(".git", dir_fd=repo_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise CommitDiffError("select a Git repository with a .git directory") from exc
+        if stat.S_ISREG(git_info.st_mode):
+            raise CommitDiffError("Linked worktrees are not supported; select a repository with a .git directory")
+        if not stat.S_ISDIR(git_info.st_mode):
+            raise CommitDiffError("repository .git must be a real directory, not a symlink or file")
+        git_dir_fd = os.open(".git", directory_flags, dir_fd=repo_fd)
+
+        location = _GitLocation(git_dir_fd=git_dir_fd)
+        return _collect_commit_diff(
+            "/",
+            base_commit,
+            head_commit,
+            max_bytes=max_bytes,
+            max_files=max_files,
+            batch_bytes=batch_bytes,
+            include_sources=include_sources,
+            include_context=include_context,
+            location=location,
+        )
+    except CommitDiffError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CommitDiffError("could not safely open the selected local Git repository") from exc
+    finally:
+        for fd in (git_dir_fd, repo_fd, root_fd):
+            if fd is not None:
+                os.close(fd)
+
+
+def _collect_commit_diff(
+    repo_dir: str | os.PathLike[str],
+    base_commit: str,
+    head_commit: str,
+    *,
+    max_bytes: int,
+    max_files: int,
+    batch_bytes: int | None = None,
+    include_sources: bool = False,
+    include_context: bool = False,
+    location: _GitLocation | None = None,
+) -> dict:
+    """Return bounded source changes between two explicit commit object IDs.
+
+    Only committed Git objects are read. The work tree, index, refs, and Git
+    configuration are not modified. Oversized comparisons fail as a whole so
+    callers never mistake a truncated patch for complete review input.
+    """
+
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1 <= max_bytes <= _MAX_BYTES_LIMIT:
+        raise CommitDiffError(f"max_bytes must be between 1 and {_MAX_BYTES_LIMIT}")
+    if isinstance(max_files, bool) or not isinstance(max_files, int) or not 1 <= max_files <= _MAX_FILES_LIMIT:
+        raise CommitDiffError(f"max_files must be between 1 and {_MAX_FILES_LIMIT}")
+    if batch_bytes is not None and (
+        isinstance(batch_bytes, bool)
+        or not isinstance(batch_bytes, int)
+        or not 1 <= batch_bytes <= _MAX_REVIEW_INPUT_BYTES
+    ):
+        raise CommitDiffError(f"batch_bytes must be between 1 and {_MAX_REVIEW_INPUT_BYTES}")
+    if not isinstance(include_sources, bool):
+        raise CommitDiffError("include_sources must be a boolean")
+    if not isinstance(include_context, bool):
+        raise CommitDiffError("include_context must be a boolean")
+    if include_context and not include_sources:
+        raise CommitDiffError("include_context requires include_sources")
+    if location is None and not Path(repo_dir).is_dir():
+        raise CommitDiffError("repository directory is unavailable")
+
+    deadline = time.monotonic() + _TOTAL_TIMEOUT_SECONDS
+    try:
+        base = _resolve_commit(repo_dir, base_commit, "base", deadline, location)
+        base_tree = _tree_id(repo_dir, base, "base", deadline, location)
+    except CommitDiffError as exc:
+        raise CommitDiffError(str(exc), field="base_commit_sha") from exc
+    try:
+        head = _resolve_commit(repo_dir, head_commit, "head", deadline, location)
+        head_tree = _tree_id(repo_dir, head, "head", deadline, location)
+    except CommitDiffError as exc:
+        raise CommitDiffError(str(exc), field="commit_sha") from exc
+    if base_tree == head_tree:
+        result = {
+            "base_commit": base,
+            "head_commit": head,
+            "patch": "",
+            "files": [],
+            "unreviewed": [],
+            "no_changes": True,
+        }
+        if batch_bytes is not None:
+            result["batches"] = []
+        if include_sources:
+            result["sources"] = []
+        if include_context:
+            result["context_unreviewed"] = []
+        return result
+
+    raw_limit = max_files * 8400 + 1
+    raw_output = _run_git(
+        repo_dir,
+        [
+            "diff",
+            "--raw",
+            "-z",
+            "--no-abbrev",
+            "--find-renames=50%",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            base,
+            head,
+            "--",
+        ],
+        stdout_limit=raw_limit,
+        deadline=deadline,
+        location=location,
+    )
+    changes = _parse_raw_diff(raw_output)
+    if len(changes) > max_files:
+        raise CommitDiffError("comparison exceeds the configured file limit")
+
+    unreviewed: list[dict[str, str]] = []
+    candidates: list[_Change] = []
+    for change in changes:
+        reason = _unsupported_reason(change)
+        if reason:
+            path = change.new_path or change.old_path
+            unreviewed.append({"path": _display_path(path), "reason": reason})
+        elif change.old_object == change.new_object:
+            status = _status_name(change)
+            reason = (
+                "rename has no changed source lines" if status == "renamed" else "change has no source lines to review"
+            )
+            unreviewed.append({"path": _display_path(change.new_path or change.old_path), "reason": reason})
+        else:
+            candidates.append(change)
+
+    sizes: dict[str, int] = {}
+    for change in candidates:
+        for object_id in (change.old_object, change.new_object):
+            if _ZERO_OBJECT_ID_RE.fullmatch(object_id):
+                continue
+            if object_id not in sizes:
+                sizes[object_id] = _object_size(repo_dir, object_id, deadline, location)
+
+    blobs: dict[str, bytes] = {}
+    binary_objects: set[str] = set()
+    processed_bytes = 0
+    for object_id, size in sizes.items():
+        if processed_bytes + min(size, _BINARY_PROBE_BYTES) > _MAX_SOURCE_PROCESSING_BYTES:
+            raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+        probe = _probe_blob(repo_dir, object_id, size, deadline, location)
+        processed_bytes += len(probe)
+        if b"\0" in probe:
+            binary_objects.add(object_id)
+        elif size <= _BINARY_PROBE_BYTES:
+            blobs[object_id] = probe
+
+    reviewable = [
+        change
+        for change in candidates
+        if change.old_object not in binary_objects and change.new_object not in binary_objects
+    ]
+    reviewable_objects = {
+        object_id
+        for change in reviewable
+        for object_id in (change.old_object, change.new_object)
+        if object_id in sizes and object_id not in blobs
+    }
+    for object_id in reviewable_objects:
+        size = sizes[object_id]
+        if size > _MAX_SOURCE_BLOB_BYTES:
+            raise CommitDiffError("source object exceeds the 1 MiB processing limit")
+        if processed_bytes + size > _MAX_SOURCE_PROCESSING_BYTES:
+            raise CommitDiffError("comparison exceeds the 8 MiB source processing limit")
+        blobs[object_id] = _read_blob(repo_dir, object_id, size, deadline, location)
+        processed_bytes += size
+
+    files: list[dict] = []
+    sources: list[dict[str, str]] = []
+    patch_parts: list[str] = []
+    batch_sources: list[tuple[dict, list[str], list[str], difflib.SequenceMatcher]] = []
+    for change in candidates:
+        if change.old_object in binary_objects or change.new_object in binary_objects:
+            unreviewed.append(
+                {"path": _display_path(change.new_path or change.old_path), "reason": "binary content is unsupported"}
+            )
+            continue
+        old_bytes = b"" if _ZERO_OBJECT_ID_RE.fullmatch(change.old_object) else blobs[change.old_object]
+        new_bytes = b"" if _ZERO_OBJECT_ID_RE.fullmatch(change.new_object) else blobs[change.new_object]
+        if b"\0" in old_bytes or b"\0" in new_bytes:
+            unreviewed.append(
+                {"path": _display_path(change.new_path or change.old_path), "reason": "binary content is unsupported"}
+            )
+            continue
+        try:
+            old_text = old_bytes.decode("utf-8")
+            new_text = new_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            unreviewed.append(
+                {"path": _display_path(change.new_path or change.old_path), "reason": "text is not valid UTF-8"}
+            )
+            continue
+
+        old_path = _display_path(change.old_path) if change.old_path else None
+        new_path = _display_path(change.new_path) if change.new_path else None
+        status = _status_name(change)
+        assert status is not None
+        if old_text == new_text:
+            unreviewed.append({"path": new_path or old_path, "reason": "change has no source lines to review"})
+            continue
+        old_lines = _source_lines(old_text)
+        new_lines = _source_lines(new_text)
+        matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+        opcodes = matcher.get_opcodes()
+        file_patch = _unified_patch(old_text, new_text, old_path or "", new_path or "")
+        patch_parts.append(file_patch)
+        metadata = {
+            "path": new_path or old_path,
+            "base_path": old_path,
+            "head_path": new_path,
+            "status": status,
+            "base_lines": len(old_lines),
+            "head_lines": len(new_lines),
+            "base_changed_lines": _changed_ranges(opcodes, "base"),
+            "head_changed_lines": _changed_ranges(opcodes, "head"),
+        }
+        files.append(metadata)
+        if include_sources:
+            sources.append({"path": metadata["path"], "base": old_text, "head": new_text})
+        if batch_bytes is not None:
+            batch_sources.append((metadata, old_lines, new_lines, matcher))
+
+    patch = "".join(patch_parts)
+    input_limit = max_bytes if batch_bytes is not None else min(max_bytes, _MAX_REVIEW_INPUT_BYTES)
+    if len(patch.encode("utf-8")) > input_limit:
+        raise CommitDiffError("comparison exceeds the configured patch byte limit")
+    result = {
+        "base_commit": base,
+        "head_commit": head,
+        "patch": patch,
+        "files": files,
+        "unreviewed": unreviewed,
+        "no_changes": False,
+    }
+    if _serialized_bytes(result) > input_limit:
+        raise CommitDiffError("comparison exceeds the configured review input byte limit")
+    if batch_bytes is not None:
+        result["batches"] = _build_batches(base, head, batch_sources, batch_bytes)
+    if include_context:
+        context_sources, context_unreviewed = _context_sources(
+            repo_dir,
+            base_tree,
+            head_tree,
+            changes,
+            files,
+            sizes,
+            blobs,
+            binary_objects,
+            processed_bytes,
+            deadline,
+            location,
+        )
+        sources.extend(context_sources)
+        result["context_unreviewed"] = context_unreviewed
+    if include_sources:
+        result["sources"] = sources
+    return result

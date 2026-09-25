@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { prisma } from '../db.js';
 import {
   validateScan,
+  validateCommitDiffScan,
   validateScanJobLimit,
   validateModelSelection,
   validateModelOverrides,
@@ -14,8 +15,11 @@ import {
 import { assembleScans, assembleScan } from '../lib/repo.js';
 import { repoDisplayName, serializeSupplementalPostScriptRun, serializeVulnerability } from '../lib/serialize.js';
 import { SCAN_STATUSES, extractExtraKeys } from '../lib/constants.js';
-import { localRepoNames } from '../lib/localRepos.js';
+import { localCommitReviewNames, localRepoNames } from '../lib/localRepos.js';
 import { assertModelSelectionAvailable } from '../lib/modelSelection.js';
+import { isModelProviderConfigured } from '../lib/modelProviders.js';
+import { readSelfHostedConfig } from '../lib/selfHostedConfig.js';
+import { ensureDefensiveReviewWorkflow, isDefensiveReviewWorkflowName } from '../lib/defensiveReviewWorkflow.js';
 import { lockWorkflowForScan } from '../lib/workflowLocks.js';
 import { lockPostScriptForScan } from '../lib/postScriptLocks.js';
 import { lockAgentSkillForScan } from '../lib/agentSkillLocks.js';
@@ -58,6 +62,7 @@ const USER_STATUS_TRANSITIONS = Object.freeze({
   stopped: new Set(['pending']),
   failed: new Set(['pending']),
 });
+const DIFF_REVIEW_RESOURCE_ID = 0n;
 
 function paginationInteger(value) {
   if (Array.isArray(value) || typeof value === 'object' || !/^\d+$/.test(String(value ?? ''))) return null;
@@ -104,6 +109,108 @@ export function scanLaunchDecision(body, activeScanCount) {
     ]);
   }
   return { kind: 'ready', status: launchPolicy === 'queue' ? 'queued' : 'pending' };
+}
+
+export function scanComparisonMode(body = {}) {
+  const snake = body?.comparison_mode;
+  const camel = body?.comparisonMode;
+  const mode = snake === undefined ? camel : snake;
+  if (
+    (snake !== undefined && camel !== undefined && snake !== camel) ||
+    (mode !== undefined && mode !== 'full_repository' && mode !== 'commits')
+  ) {
+    throw new ValidationError([
+      { field: 'comparison_mode', message: 'Comparison mode must be "full_repository" or "commits".' },
+    ]);
+  }
+  return mode ?? 'full_repository';
+}
+
+export async function createCommitDiffScan(
+  reqBody = {},
+  {
+    localNames = localCommitReviewNames(),
+    db = prisma,
+    readConfig = readSelfHostedConfig,
+    providerConfigured = isModelProviderConfigured,
+    ensureWorkflow = ensureDefensiveReviewWorkflow,
+  } = {}
+) {
+  const valid = validateCommitDiffScan(reqBody, { localNames });
+  const selfHosted = await readConfig();
+  if (!selfHosted.baseUrl || !selfHosted.model) {
+    throw new ValidationError([
+      { field: 'model_provider', message: 'Configure Self-hosted AI in Accounts before starting a commit review.' },
+    ]);
+  }
+  if (!providerConfigured('self_hosted')) {
+    throw new ValidationError([
+      {
+        field: 'model_provider',
+        message: 'Configure and activate Self-hosted AI in Accounts before starting a commit review.',
+      },
+    ]);
+  }
+
+  const activeScanCount = await db.scan.count({ where: { status: { in: ACTIVE_SCAN_STATUSES } } });
+  const launchDecision = scanLaunchDecision(reqBody, activeScanCount);
+  if (launchDecision.kind === 'choice-required') {
+    const error = new Error('Another scan is running. Choose whether to start immediately or queue this scan.');
+    error.status = 409;
+    error.code = 'scan_launch_policy_required';
+    error.errors = [{ field: 'launchPolicy', message: 'Choose whether to start immediately or queue this scan.' }];
+    throw error;
+  }
+
+  const data = {
+    // Quick reviews use the zero workflow ID; defensive reviews receive a
+    // curated workflow ID below. Both retain the existing scan row shape.
+    workflowId: DIFF_REVIEW_RESOURCE_ID,
+    postScriptId: DIFF_REVIEW_RESOURCE_ID,
+    repoFull: valid.repoFull,
+    repoKind: valid.repoKind,
+    commitSha: valid.commitSha,
+    comparisonMode: 'commits',
+    baseCommitSha: valid.baseCommitSha,
+    repoScope: 'two commits',
+    dependencies: [],
+    configuration: {
+      self_hosted_base_url: selfHosted.baseUrl,
+      review_kind: valid.reviewKind,
+      ...(valid.reviewKind === 'workflow' ? { source_review_version: 1 } : {}),
+    },
+    model: selfHosted.model,
+    modelProvider: 'self_hosted',
+    harness: 'self-hosted',
+    thinkingEffort: 'default',
+    modelOverrides: {},
+    status: launchDecision.status,
+    config: {},
+    scopes: { files: [], lines: [] },
+    reasoning: Prisma.DbNull,
+    severityRanker: null,
+    extra: Prisma.DbNull,
+    extras: Prisma.DbNull,
+  };
+  if (valid.reviewKind === 'workflow') {
+    return db.$transaction(async (tx) => {
+      const workflow = await ensureWorkflow(tx);
+      return tx.scan.create({ data: { ...data, workflowId: workflow.id } });
+    });
+  }
+  return db.scan.create({ data });
+}
+
+async function createCommitDiffScanResponse(req, res, next) {
+  try {
+    const created = await createCommitDiffScan(req.body);
+    res.status(201).json(await assembleScan(created));
+  } catch (error) {
+    if (error?.status === 409 && error.code === 'scan_launch_policy_required') {
+      return res.status(409).json({ error: error.message, code: error.code, errors: error.errors });
+    }
+    next(error);
+  }
 }
 
 export async function deleteScanOwnedData(tx, scanId) {
@@ -261,6 +368,9 @@ export async function createSupplementalPostScriptRun(tx, scanId, body, { assert
   await lockScanForMutation(tx, scanId);
   const scan = await tx.scan.findUnique({ where: { id: scanId } });
   if (!scan) return { kind: 'scan-not-found' };
+  if (scan.comparisonMode === 'commits') {
+    return { kind: 'diff-review-unsupported' };
+  }
   if (!SUPPLEMENTAL_POST_SCRIPT_SCAN_STATUSES.includes(scan.status)) {
     return { kind: 'scan-active', status: scan.status };
   }
@@ -299,6 +409,9 @@ export async function retrySupplementalPostScriptRun(tx, scanId, runId, body = {
   await lockScanForMutation(tx, scanId);
   const scan = await tx.scan.findUnique({ where: { id: scanId } });
   if (!scan) return { kind: 'scan-not-found' };
+  if (scan.comparisonMode === 'commits') {
+    return { kind: 'diff-review-unsupported' };
+  }
   if (!SUPPLEMENTAL_POST_SCRIPT_SCAN_STATUSES.includes(scan.status)) {
     return { kind: 'scan-active', status: scan.status };
   }
@@ -602,6 +715,31 @@ export async function patchScanIfPresent(tx, scanId, body, { assertAvailable, av
   const existing = await tx.scan.findUnique({ where: { id: scanId } });
   if (!existing) return { kind: 'not-found' };
 
+  const isDiffReview = existing.comparisonMode === 'commits';
+  const runtimeFields = [
+    'model',
+    'model_provider',
+    'modelProvider',
+    'harness',
+    'thinking_effort',
+    'thinkingEffort',
+    'post_processing_model',
+    'postProcessingModel',
+    'post_processing_model_provider',
+    'postProcessingModelProvider',
+    'post_processing_harness',
+    'postProcessingHarness',
+    'post_processing_thinking_effort',
+    'postProcessingThinkingEffort',
+    'model_overrides',
+    'modelOverrides',
+  ];
+  if (isDiffReview && runtimeFields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+    throw new ValidationError([
+      { field: 'scan', message: 'Commit review model settings are fixed when the review starts.' },
+    ]);
+  }
+
   const data = {};
   if (
     Object.prototype.hasOwnProperty.call(body, 'jobLimit') ||
@@ -788,6 +926,9 @@ router.post('/:id/supplemental-post-script-runs', async (req, res, next) => {
         error: `Cannot add post-processing while this scan is ${result.status}. Pause or stop it first.`,
       });
     }
+    if (result.kind === 'diff-review-unsupported') {
+      return res.status(409).json({ error: 'Commit reviews do not support supplemental post-scripts.' });
+    }
     res.status(201).json(serializeSupplementalPostScriptRun(result.run, result.targets));
   } catch (e) {
     next(e);
@@ -811,6 +952,9 @@ router.post('/:id/supplemental-post-script-runs/:runId/retry', async (req, res, 
       return res.status(409).json({
         error: `Cannot retry post-processing while this scan is ${result.status}. Pause or stop it first.`,
       });
+    }
+    if (result.kind === 'diff-review-unsupported') {
+      return res.status(409).json({ error: 'Commit reviews do not support supplemental post-scripts.' });
     }
     if (result.kind === 'run-active') {
       return res.status(409).json({ error: `This supplemental run is still ${result.status}.` });
@@ -843,6 +987,11 @@ router.get('/:id/export', async (req, res, next) => {
           repoKind: true,
           workflowId: true,
           postScriptId: true,
+          commitSha: true,
+          comparisonMode: true,
+          baseCommitSha: true,
+          configuration: true,
+          extras: true,
           insertedAt: true,
           updatedAt: true,
         },
@@ -851,6 +1000,33 @@ router.get('/:id/export', async (req, res, next) => {
       if (!FINDING_EXPORT_STATUSES.includes(scan.status)) {
         const availability = findingExportAvailability(scan, 0);
         return res.status(409).json({ error: availability.message });
+      }
+      if (scan.comparisonMode === 'commits') {
+        const review =
+          scan.extras?.diff_review && typeof scan.extras.diff_review === 'object' ? scan.extras.diff_review : null;
+        res
+          .status(200)
+          .type('application/json')
+          .attachment(`${repoDisplayName(scan.repoFull, scan.repoKind)}-commit-review.json`)
+          .send(
+            JSON.stringify(
+              {
+                id: scan.id.toString(),
+                status: scan.status,
+                repoFull: scan.repoFull,
+                repoKind: scan.repoKind ?? 'remote',
+                comparisonMode: 'commits',
+                baseCommitSha: scan.baseCommitSha ?? null,
+                headCommitSha: scan.commitSha,
+                diffReview: review,
+                insertedAt: scan.insertedAt,
+                updatedAt: scan.updatedAt,
+              },
+              null,
+              2
+            )
+          );
+        return;
       }
 
       const sourceProfile = await findingExportSourceProfile(id);
@@ -952,6 +1128,9 @@ router.get('/:id/export', async (req, res, next) => {
 // POST /api/scans — create a scan now or place it behind active scans.
 router.post('/', async (req, res, next) => {
   try {
+    if (scanComparisonMode(req.body) === 'commits') {
+      return await createCommitDiffScanResponse(req, res, next);
+    }
     const valid = validateScan(req.body, { localNames: localRepoNames() });
     await assertModelSelectionAvailable(valid);
     await assertSelectionAvailable(assertModelSelectionAvailable, valid.postProcessingSelection, 'post_processing');
@@ -1029,6 +1208,9 @@ router.post('/', async (req, res, next) => {
       const postScript = postScriptMap.get(`${valid.postScriptId}`);
       const errors = [];
       if (!workflow) errors.push({ field: 'workflowId', message: 'Workflow does not exist.' });
+      if (workflow && isDefensiveReviewWorkflowName(workflow.name)) {
+        errors.push({ field: 'workflowId', message: 'Use Two commits to start the defensive review workflow.' });
+      }
       if (!postScript) errors.push({ field: 'postScriptId', message: 'Post-script does not exist.' });
       if (invalidPostScriptIds.length)
         errors.push({

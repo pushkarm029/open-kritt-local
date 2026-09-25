@@ -308,6 +308,13 @@ export function serializeScan(
     scan.configuration && typeof scan.configuration === 'object' && !Array.isArray(scan.configuration)
       ? scan.configuration
       : {};
+  const extras = scan.extras && typeof scan.extras === 'object' && !Array.isArray(scan.extras) ? scan.extras : {};
+  const diffReview =
+    extras.diff_review && typeof extras.diff_review === 'object' && !Array.isArray(extras.diff_review)
+      ? extras.diff_review
+      : null;
+  const diffFindingCount = Array.isArray(diffReview?.findings) ? diffReview.findings.length : 0;
+  const diffScan = scan.comparisonMode === 'commits';
   const postProcessingModel = configuration.post_processing_model ?? configuration.postProcessingModel;
   const postProcessingModelProvider =
     configuration.post_processing_model_provider ?? configuration.postProcessingModelProvider;
@@ -322,6 +329,9 @@ export function serializeScan(
     repoDisplay: repoDisplayName(scan.repoFull, scan.repoKind),
     commitSha: commit,
     commitShort: commit.length > 7 ? commit.slice(0, 7) : commit,
+    comparisonMode: diffScan ? 'commits' : null,
+    baseCommitSha: diffScan ? (scan.baseCommitSha ?? null) : null,
+    diffReview,
     repoScope: scan.repoScope,
     dependencies: serializeDependencies(scan),
     configuration,
@@ -362,12 +372,12 @@ export function serializeScan(
     })),
     agentSkillNames: agentSkills.map((skill) => skill.name),
     agentSkillCount: agentSkills.length,
-    findings,
-    rawCandidates,
-    canonicalFindings,
-    duplicateFindings,
-    unprocessedFindings,
-    exploitable,
+    findings: diffScan ? diffFindingCount : findings,
+    rawCandidates: diffScan ? diffFindingCount : rawCandidates,
+    canonicalFindings: diffScan ? diffFindingCount : canonicalFindings,
+    duplicateFindings: diffScan ? 0 : duplicateFindings,
+    unprocessedFindings: diffScan ? 0 : unprocessedFindings,
+    exploitable: diffScan ? 0 : exploitable,
     progress,
     progressLabel,
     statusSummary: statusSummary ? { ...statusSummary, progress, progressLabel } : null,

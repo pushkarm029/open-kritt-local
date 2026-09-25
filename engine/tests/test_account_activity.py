@@ -11,7 +11,7 @@ from open_kritt_engine.account_activity import (
     assert_account_assignment,
     read_account_activity,
 )
-from open_kritt_engine.provider_credentials import job_environment
+from open_kritt_engine.provider_credentials import job_environment, provider_environment
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def test_default_mixed_all_inactive_and_reactivated_pools(provider, activity, mo
     assert workspace.provider_home_for_job(provider, 1) == homes[0]
 
 
-@pytest.mark.parametrize("provider,keys", API_ACCOUNT_KEYS.items())
+@pytest.mark.parametrize("provider,keys", [(p, k) for p, k in API_ACCOUNT_KEYS.items() if p != "self_hosted"])
 def test_disabled_keys_do_not_reach_jobs_or_retries(provider, keys, activity, tmp_path):
     source = {"OPEN_KRITT_PROVIDER_CREDENTIALS_PATH": str(tmp_path / "providers.json")}
     source.update(dict.fromkeys(keys, "synthetic-key"))
@@ -143,3 +143,18 @@ def test_inactive_key_does_not_block_an_active_login(activity, tmp_path):
     (home / "auth.json").write_text("{}")
     activity("codex", {"CODEX_API_KEY": False})
     assert_account_assignment("codex", str(home), {})
+
+
+def test_self_hosted_key_activity_and_harness_isolation(activity, tmp_path):
+    source = {
+        "OPEN_KRITT_PROVIDER_CREDENTIALS_PATH": str(tmp_path / "providers.json"),
+        "SELF_HOSTED_API_KEY": "synthetic-key",
+    }
+    assert provider_environment(source)["SELF_HOSTED_API_KEY"] == "synthetic-key"
+    assert "SELF_HOSTED_API_KEY" not in job_environment("self_hosted", "codex", source)
+    activity("self_hosted", {"SELF_HOSTED_API_KEY": False})
+    assert "SELF_HOSTED_API_KEY" not in provider_environment(source)
+    with pytest.raises(AccountInactiveError, match="inactive"):
+        assert_account_assignment("self_hosted", env=source)
+    activity("self_hosted", {"SELF_HOSTED_API_KEY": True})
+    assert provider_environment(source)["SELF_HOSTED_API_KEY"] == "synthetic-key"
