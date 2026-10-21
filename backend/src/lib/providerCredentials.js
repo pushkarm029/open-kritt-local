@@ -45,9 +45,16 @@ export const PROVIDER_DEFINITIONS = {
     description: 'DeepSeek models through the Codex harness, with model discovery and API checks.',
     management: 'api_key',
   },
+  local: {
+    label: 'Local AI',
+    envKeys: ['LOCAL_AI_BASE_URL'],
+    credentialLabel: 'Server URL',
+    description: 'Self-hosted OpenAI-compatible models (Ollama, LM Studio, llama.cpp, vLLM) through the Codex harness.',
+    management: 'endpoint',
+  },
 };
 
-const MANAGED_CREDENTIAL_PROVIDERS = new Set(['openrouter', 'xai', 'deepseek']);
+const MANAGED_CREDENTIAL_PROVIDERS = new Set(['openrouter', 'xai', 'deepseek', 'local']);
 
 const MAX_CREDENTIAL_LENGTH = 16 * 1024;
 let writeQueue = Promise.resolve();
@@ -119,15 +126,31 @@ function queuedWrite(operation) {
   return pending;
 }
 
+function isLocalServerUrl(value) {
+  if (value.length > 2048 || /[\s"\\]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function validateProviderCredential(provider, credential) {
   if (!MANAGED_CREDENTIAL_PROVIDERS.has(provider)) {
     return { field: 'provider', message: 'This provider does not use a managed API key in Accounts.' };
   }
   if (typeof credential !== 'string' || !credential.trim()) {
-    return { field: 'credential', message: 'Enter an API key.' };
+    return { field: 'credential', message: provider === 'local' ? 'Enter a server URL.' : 'Enter an API key.' };
   }
   if (credential.length > MAX_CREDENTIAL_LENGTH || /[\r\n]/.test(credential)) {
     return { field: 'credential', message: 'The API key must be a single line under 16 KB.' };
+  }
+  if (provider === 'local' && !isLocalServerUrl(credential.trim())) {
+    return {
+      field: 'credential',
+      message: 'Enter an http(s) server URL such as http://host.docker.internal:11434/v1.',
+    };
   }
   return null;
 }
@@ -231,7 +254,7 @@ export function providerCredentialStatuses({
       apiKeyConfigured: managedCredential || environmentCredential,
       apiKeyPath: definition.envKeys[0],
       source,
-      canManage: definition.management === 'login' || definition.management === 'api_key',
+      canManage: ['login', 'api_key', 'endpoint'].includes(definition.management),
       // xAI keeps OpenRouter-style managed API keys alongside device login.
       canManageKey: MANAGED_CREDENTIAL_PROVIDERS.has(id),
       canRemove: MANAGED_CREDENTIAL_PROVIDERS.has(id) && (managedCredential || environmentCredential),

@@ -324,6 +324,8 @@ def test_generation_environment_contains_only_selected_provider_credentials():
         "DEEPSEEK_API_KEY": "deepseek-secret",
         "OPENROUTER_API_KEY": "openrouter-secret",
         "XAI_API_KEY": "xai-secret",
+        "LOCAL_AI_BASE_URL": "http://host.docker.internal:11434/v1",
+        "LOCAL_AI_API_KEY": "local-secret",
         "GITHUB_TOKEN": "github-secret",
         "DATABASE_URL": "database-secret",
     }
@@ -332,6 +334,7 @@ def test_generation_environment_contains_only_selected_provider_credentials():
     openrouter_env = generation_environment("openrouter", source)
     deepseek_env = generation_environment("deepseek", source)
     xai_env = generation_environment("xai", source)
+    local_env = generation_environment("local", source)
 
     assert codex_env["CODEX_API_KEY"] == "openai-secret"
     assert codex_env["CODEX_HOME"] == "/codex-a"
@@ -341,7 +344,11 @@ def test_generation_environment_contains_only_selected_provider_credentials():
     assert deepseek_env["DEEPSEEK_API_KEY"] == "deepseek-secret"
     assert xai_env["XAI_API_KEY"] == "xai-secret"
     assert "OPENROUTER_API_KEY" not in xai_env
-    for env in (codex_env, openrouter_env, deepseek_env, xai_env):
+    assert local_env["LOCAL_AI_BASE_URL"] == "http://host.docker.internal:11434/v1"
+    assert local_env["LOCAL_AI_API_KEY"] == "local-secret"
+    assert "OPENAI_API_KEY" not in local_env
+    assert "LOCAL_AI_API_KEY" not in codex_env
+    for env in (codex_env, openrouter_env, deepseek_env, xai_env, local_env):
         assert "GITHUB_TOKEN" not in env
         assert "DATABASE_URL" not in env
 
@@ -683,6 +690,66 @@ def test_deepseek_codex_command_uses_fixed_provider_without_search_or_secret():
     assert f'model_catalog_json="{harnesses.DEEPSEEK_CODEX_MODEL_CATALOG}"' in configs
     assert 'web_search="disabled"' in configs
     assert not any("secret" in value for value in command)
+
+
+def test_local_codex_command_uses_configured_server_without_search_or_secret():
+    command = codex_exec_command(
+        repo_dir="/tmp/repo",
+        model="Qwen3.8-Flash-Next",
+        schema_path="/tmp/schema.json",
+        output_path="/tmp/output.json",
+        model_provider="local",
+        thinking_effort="default",
+        allow_tools=True,
+        env={"LOCAL_AI_BASE_URL": "https://spark.example.ts.net/v1/", "LOCAL_AI_API_KEY": "local-secret"},
+    )
+    configs = [command[index + 1] for index, value in enumerate(command) if value == "-c"]
+
+    assert "--search" not in command
+    assert 'model_provider="local"' in configs
+    assert 'model_providers.local.base_url="https://spark.example.ts.net/v1"' in configs
+    assert 'model_providers.local.env_key="LOCAL_AI_API_KEY"' in configs
+    assert 'model_providers.local.wire_api="responses"' in configs
+    assert 'web_search="disabled"' in configs
+    assert not any(value.startswith("model_reasoning_effort") for value in configs)
+    assert not any("secret" in value for value in command)
+
+
+def test_local_codex_command_omits_env_key_for_unauthenticated_servers():
+    command = codex_exec_command(
+        repo_dir="/tmp/repo",
+        model="qwen3-coder",
+        schema_path="/tmp/schema.json",
+        output_path="/tmp/output.json",
+        model_provider="local",
+        thinking_effort="high",
+        allow_tools=False,
+        env={"LOCAL_AI_BASE_URL": "http://host.docker.internal:11434/v1"},
+    )
+    configs = [command[index + 1] for index, value in enumerate(command) if value == "-c"]
+
+    assert 'model_providers.local.base_url="http://host.docker.internal:11434/v1"' in configs
+    assert not any("env_key" in value for value in configs)
+    assert 'model_reasoning_effort="high"' in configs
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [None, "", "localhost:11434/v1", "ftp://host/v1", 'http://host/v1"\nmodel_provider="openai', "http://host /v1"],
+)
+def test_local_codex_command_rejects_missing_or_unsafe_server_urls(base_url):
+    with pytest.raises(harnesses.HarnessError) as exc_info:
+        codex_exec_command(
+            repo_dir="/tmp/repo",
+            model="qwen3-coder",
+            schema_path="/tmp/schema.json",
+            output_path="/tmp/output.json",
+            model_provider="local",
+            thinking_effort=None,
+            allow_tools=True,
+            env={"LOCAL_AI_BASE_URL": base_url} if base_url is not None else {},
+        )
+    assert exc_info.value.code == "configuration_error"
 
 
 def test_tool_free_claude_command_has_no_default_tools(monkeypatch):

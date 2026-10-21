@@ -185,6 +185,7 @@ OPENROUTER_CURSOR_BASE_URL = "https://openrouter.ai/api/v1/cursor"
 OPENROUTER_CODEX_BASE_URL = "https://openrouter.ai/api/v1"
 DEEPSEEK_CODEX_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CODEX_MODEL_CATALOG = "/app/open_kritt_engine/deepseek_models.json"
+LOCAL_AI_BASE_URL_MAX_LENGTH = 2048
 OPENROUTER_MODEL_ALIASES = {
     "glm-5.2": "z-ai/glm-5.2",
     "grok-4.5": "x-ai/grok-4.5",
@@ -203,7 +204,7 @@ CLAUDE_MODEL_ALIASES = {
     "opus-4.8": "claude-opus-4-8",
 }
 DEFAULT_MODEL_PROVIDER = "openrouter"
-MODEL_PROVIDERS = {"codex", "claude", "openrouter", "xai", "deepseek"}
+MODEL_PROVIDERS = {"codex", "claude", "openrouter", "xai", "deepseek", "local"}
 GROK_BUILD_THINKING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 DEFAULT_GROK_BUILD_MODEL = "grok-4.6"
 GROK_BUILD_RUNTIME_ENV = {
@@ -982,6 +983,7 @@ def _scan_docker_command(
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "XAI_API_KEY",
+        "LOCAL_AI_API_KEY",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
@@ -1044,6 +1046,10 @@ def _scan_docker_command(
         reservation_mb = min(reservation_mb, int(memory_limit_mb))
     if reservation_mb > 0:
         docker_cmd.extend(["--memory-reservation", f"{reservation_mb}m"])
+    if env.get("LOCAL_AI_BASE_URL"):
+        # Docker Desktop resolves this name already; Linux needs the explicit
+        # gateway mapping so a model server on the host stays reachable.
+        docker_cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
     if workspace_host is not None:
         docker_cmd.extend(
             [
@@ -1114,6 +1120,35 @@ def _append_deepseek_codex_config(command: list[str]) -> None:
     command.extend(["-c", 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"'])
     command.extend(["-c", 'model_providers.deepseek.wire_api="responses"'])
     command.extend(["-c", f'model_catalog_json="{DEEPSEEK_CODEX_MODEL_CATALOG}"'])
+    command.extend(["-c", 'web_search="disabled"'])
+
+
+def local_ai_base_url(value: Any) -> str:
+    """Validate the operator-configured OpenAI-compatible server URL."""
+
+    url = str(value or "").strip().rstrip("/")
+    if (
+        not url
+        or len(url) > LOCAL_AI_BASE_URL_MAX_LENGTH
+        or not re.fullmatch(r"https?://[^\s\"\\]+", url, flags=re.IGNORECASE)
+    ):
+        raise HarnessError(
+            "Set a valid Local AI server URL (for example http://host.docker.internal:11434/v1) in Accounts.",
+            code="configuration_error",
+        )
+    return url
+
+
+def _append_local_codex_config(command: list[str], base_url: str | None, *, api_key_configured: bool) -> None:
+    """Add the Codex provider definition for an OpenAI-compatible local server."""
+
+    command.extend(["-c", 'model_providers.local.name="Local AI"'])
+    command.extend(["-c", f"model_providers.local.base_url={json.dumps(local_ai_base_url(base_url))}"])
+    if api_key_configured:
+        # Most local servers accept unauthenticated requests. Codex fails when
+        # a declared env_key is missing, so declare it only when a key exists.
+        command.extend(["-c", 'model_providers.local.env_key="LOCAL_AI_API_KEY"'])
+    command.extend(["-c", 'model_providers.local.wire_api="responses"'])
     command.extend(["-c", 'web_search="disabled"'])
 
 
@@ -1663,6 +1698,7 @@ def codex_exec_command(
     codex_model_provider: str | None = None,
     max_subagents: int | None = None,
     fast_mode: bool = False,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     """Build a Codex exec command while preserving scan-mode compatibility."""
 
@@ -1675,7 +1711,7 @@ def codex_exec_command(
         model = OPENROUTER_MODEL_ALIASES.get(model, model)
     command = ["codex"]
     selected_provider = normalize_model_provider(model_provider)
-    if allow_tools and selected_provider != "deepseek":
+    if allow_tools and selected_provider not in {"deepseek", "local"}:
         command.append("--search")
     command.extend(["exec", "--json", "-C", repo_dir, "-m", model])
     if allow_tools:
@@ -1708,6 +1744,11 @@ def codex_exec_command(
         command.extend(["-c", 'model_providers.openrouter.wire_api="responses"'])
     if cli_model_provider == "deepseek":
         _append_deepseek_codex_config(command)
+    if cli_model_provider == "local":
+        job_env = env or {}
+        _append_local_codex_config(
+            command, job_env.get("LOCAL_AI_BASE_URL"), api_key_configured=bool(job_env.get("LOCAL_AI_API_KEY"))
+        )
     if cli_model_provider:
         command.extend(["-c", f"model_provider={json.dumps(cli_model_provider)}"])
     if thinking_effort and thinking_effort != "default":
@@ -1787,6 +1828,7 @@ class CodexHarness:
                 allow_tools=allow_tools,
                 max_subagents=self.max_subagents if allow_tools else None,
                 fast_mode=self.fast_mode,
+                env=actual_env,
             )
             if allow_tools:
                 cmd = _scan_docker_command(
@@ -1871,7 +1913,7 @@ class CodexHarness:
                     output_artifact=process_output,
                     provider=(
                         normalize_model_provider(self.model_provider)
-                        if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek"}
+                        if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek", "local"}
                         else None
                     ),
                 ) from payload_error
@@ -1912,6 +1954,10 @@ class CodexHarness:
         )
         if cli_model_provider == "deepseek":
             _append_deepseek_codex_config(cmd)
+        if cli_model_provider == "local":
+            _append_local_codex_config(
+                cmd, env.get("LOCAL_AI_BASE_URL"), api_key_configured=bool(env.get("LOCAL_AI_API_KEY"))
+            )
         if cli_model_provider:
             cmd.extend(["-c", f"model_provider={json.dumps(cli_model_provider)}"])
         if thinking_effort and thinking_effort != "default":
@@ -1961,7 +2007,7 @@ class CodexHarness:
                 output_artifact=process_output,
                 provider=(
                     normalize_model_provider(self.model_provider)
-                    if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek"}
+                    if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek", "local"}
                     else None
                 ),
             ) from payload_error

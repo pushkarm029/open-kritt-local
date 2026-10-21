@@ -15,7 +15,9 @@ export async function assertModelSelectionAvailable(
     throw new ValidationError([{ field: 'model_provider', message: 'The selected model provider is not configured.' }]);
   }
 
-  if (modelProvider === 'openrouter' || modelProvider === 'xai') return;
+  // Local servers expose whatever models the operator has pulled, so accept
+  // explicit IDs even while the server is offline during a catalog refresh.
+  if (modelProvider === 'openrouter' || modelProvider === 'xai' || modelProvider === 'local') return;
 
   const catalog = modelCatalogEntry(modelProvider, await getCatalog(modelProvider));
   if (catalog.status !== 'ready') {

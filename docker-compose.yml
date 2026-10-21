@@ -36,6 +36,7 @@ services:
       OPEN_KRITT_OPENAI_API_KEY_CONFIGURED: '${OPENAI_API_KEY:+1}'
       OPEN_KRITT_ANTHROPIC_API_KEY_CONFIGURED: '${ANTHROPIC_API_KEY:+1}'
       OPEN_KRITT_DEEPSEEK_API_KEY_CONFIGURED: '${DEEPSEEK_API_KEY:+1}'
+      OPEN_KRITT_LOCAL_AI_BASE_URL_CONFIGURED: '${LOCAL_AI_BASE_URL:+1}'
       OPEN_KRITT_OPENROUTER_API_KEY_CONFIGURED: '${OPENROUTER_API_KEY:+1}'
       OPEN_KRITT_XAI_API_KEY_CONFIGURED: '${XAI_API_KEY:+1}'
       OPEN_KRITT_CODEX_LOGIN_CONFIGURED: '${CODEX_LOGIN_CONFIGURED:+1}'
@@ -93,6 +94,10 @@ services:
     image: ${ENGINE_IMAGE:-open-kritt-engine:local}
     container_name: open-kritt-engine
     oom_score_adj: -500
+    # Lets Local AI catalog refreshes and draft generation reach a model server
+    # on the Docker host. Docker Desktop provides the name; Linux needs this.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://open_kritt:open_kritt_password@db:5432/open_kritt?schema=public}
       ENGINE_DATA_DIR: ${ENGINE_DATA_DIR:-/data}
@@ -144,6 +149,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LOCAL_AI_BASE_URL: ${LOCAL_AI_BASE_URL:-}
+      LOCAL_AI_API_KEY: ${LOCAL_AI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}

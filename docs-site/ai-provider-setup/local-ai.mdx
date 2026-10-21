@@ -1,0 +1,64 @@
+---
+title: 'Local AI'
+description: 'Run scans and draft generation on a self-hosted OpenAI-compatible model server through Codex.'
+---
+
+The **Local AI** provider points the **Codex** harness at a model server you run
+yourself, such as Ollama, LM Studio, vLLM, or a server on another machine in your
+Tailscale network. Scans and workflow and post-script drafts can use it. Repository
+content goes only to the server you configure.
+
+## Server requirements
+
+Codex talks to the server through the OpenAI **Responses API** (`POST /v1/responses`)
+and discovers models with `GET /v1/models`. Current Codex releases no longer support
+Chat Completions providers. A server that serves only `/v1/chat/completions` needs a
+Responses-compatible gateway in front of it, such as a LiteLLM proxy.
+
+Recent Ollama, LM Studio, and vLLM releases serve `/v1/responses` themselves. The model
+should support tool calling; scans run Codex as an agent with shell and file tools
+inside the disposable scan runner. Codex's built-in web search is disabled for this
+provider.
+
+## Configure the server URL
+
+1. Open **Accounts**. If Local AI is hidden, select it under **Show or hide providers**.
+2. Select **Set server URL** and enter the server's `/v1` base URL.
+3. Create or duplicate a scan, choose **Local AI**, then pick a model from the live list
+   or type the exact model ID your server serves. Codex is selected as the harness.
+
+The engine and scan runners run in Docker, so `localhost` refers to the container rather
+than your machine. Use `host.docker.internal` for a server on the Docker host:
+
+| Server | Example URL |
+| --- | --- |
+| Ollama | `http://host.docker.internal:11434/v1` |
+| LM Studio | `http://host.docker.internal:1234/v1` |
+| vLLM | `http://host.docker.internal:8000/v1` |
+| Tailscale host | `https://<machine>.<tailnet>.ts.net/v1` |
+
+Compose maps `host.docker.internal` to the host gateway for the engine and for every
+Local AI scan runner, so the same URL also works on Linux. A Linux host server must
+listen on an address the Docker bridge can reach, for example `OLLAMA_HOST=0.0.0.0`.
+For a Tailscale MagicDNS name, the Docker host must resolve it: enable **Use Tailscale
+DNS** (`tailscale set --accept-dns=true`) on that machine.
+
+You can also set the URL in `.env` instead of Accounts:
+
+```bash
+LOCAL_AI_BASE_URL=http://host.docker.internal:11434/v1
+# Only for servers that require a key, for example vLLM started with --api-key.
+LOCAL_AI_API_KEY=
+```
+
+Accounts stores the URL in the protected provider credential file and mirrors it to
+`.env`. `LOCAL_AI_API_KEY` is read only from the environment. When it is empty, Codex
+sends requests without an `Authorization` header.
+
+## Models and thinking effort
+
+The engine refreshes the model list from `GET /v1/models` with the other catalogs. If
+the server is offline during a refresh, you can still type an exact model ID. The
+**default** thinking effort sends no reasoning setting, which suits most local models.
+`low`, `medium`, and `high` pass Codex's `model_reasoning_effort` through; servers that
+do not support it may ignore it or reject the request.

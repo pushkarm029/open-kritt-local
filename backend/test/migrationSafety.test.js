@@ -21,3 +21,12 @@ test('DeepSeek generation storage permits only the Codex harness', () => {
   assert.match(sql, /model_provider = 'deepseek' AND harness = 'codex'/);
   assert.doesNotMatch(sql, /model_provider = 'deepseek' AND harness = '(?:claude-code|grok-build)'/);
 });
+
+test('Local AI generation storage permits only the Codex harness and keeps DeepSeek', () => {
+  const sql = fs.readFileSync(path.join(migrationDir, '034_generations_local_codex.sql'), 'utf8');
+
+  assert.match(sql, /model_provider IN \([^)]*'deepseek'[^)]*'local'[^)]*\)/);
+  assert.match(sql, /model_provider = 'deepseek' AND harness = 'codex'/);
+  assert.match(sql, /model_provider = 'local' AND harness = 'codex'/);
+  assert.doesNotMatch(sql, /model_provider = 'local' AND harness = '(?:claude-code|grok-build)'/);
+});

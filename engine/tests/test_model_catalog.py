@@ -15,6 +15,7 @@ from open_kritt_engine.model_catalog import (
     fetch_anthropic_models,
     fetch_codex_models,
     fetch_deepseek_models,
+    fetch_local_models,
     fetch_openrouter_models,
     fetch_xai_models,
     model_supports_service_tier,
@@ -337,6 +338,38 @@ def test_fetch_deepseek_models_uses_account_catalog_and_supported_efforts(monkey
     assert request.full_url == "https://api.deepseek.com/models"
     assert request.get_header("Authorization") == "Bearer deepseek-test-key"
     assert timeout == 2
+
+
+def test_fetch_local_models_lists_server_models_with_optional_key(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return io.BytesIO(
+            json.dumps(
+                {"object": "list", "data": [{"id": "Qwen3.8-Flash-Next", "owned_by": "tensorfold"}, {"id": ""}]}
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr(model_catalog, "urlopen", fake_urlopen)
+    models, default_model = fetch_local_models("https://spark.example.ts.net/v1/", "local-key", 2)
+    unauthenticated, _default = fetch_local_models("http://host.docker.internal:11434/v1", None, 2)
+
+    assert [model["id"] for model in models] == ["Qwen3.8-Flash-Next"]
+    assert models[0]["thinkingEfforts"] == ["low", "medium", "high"]
+    assert default_model == "Qwen3.8-Flash-Next"
+    assert unauthenticated[0]["id"] == "Qwen3.8-Flash-Next"
+    assert requests[0][0].full_url == "https://spark.example.ts.net/v1/models"
+    assert requests[0][0].get_header("Authorization") == "Bearer local-key"
+    assert requests[1][0].full_url == "http://host.docker.internal:11434/v1/models"
+    assert requests[1][0].get_header("Authorization") is None
+
+
+def test_fetch_local_models_rejects_invalid_urls_without_requesting(monkeypatch):
+    monkeypatch.setattr(model_catalog, "urlopen", lambda *_args, **_kwargs: pytest.fail("unexpected request"))
+
+    with pytest.raises(model_catalog.ModelCatalogError):
+        fetch_local_models("file:///etc/passwd", None, 2)
 
 
 def test_fetch_openrouter_models_uses_account_catalog_and_keeps_all_text_models(monkeypatch):

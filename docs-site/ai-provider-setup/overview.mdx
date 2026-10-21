@@ -11,6 +11,7 @@ between them per run, but a single working provider is enough to start.
 | **Codex** | ChatGPT/Codex login or an OpenAI Platform key | Account-specific picker |
 | **Claude** | Claude subscription login or `ANTHROPIC_API_KEY` | Subscription aliases or account-specific picker |
 | **DeepSeek** | `DEEPSEEK_API_KEY` | Searchable authenticated catalog |
+| **Local AI** | `LOCAL_AI_BASE_URL` (self-hosted Responses-compatible server) | Server model list, with an exact-ID fallback |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Searchable authenticated catalog, with an exact-ID fallback |
 | **xAI** | Grok device login or `XAI_API_KEY` | Searchable authenticated catalog (with key), with an exact-ID fallback |
 
@@ -24,6 +25,9 @@ between them per run, but a single working provider is enough to start.
   <Card title="DeepSeek" icon="code" href="/ai-provider-setup/deepseek">
     Use a DeepSeek API key with the Codex harness.
   </Card>
+  <Card title="Local AI" icon="server" href="/ai-provider-setup/local-ai">
+    Use a self-hosted model server with the Codex harness.
+  </Card>
   <Card title="OpenRouter" icon="route" href="/ai-provider-setup/openrouter">
     Use one key to access compatible models through OpenRouter.
   </Card>
@@ -35,7 +39,7 @@ between them per run, but a single working provider is enough to start.
 ## Provider visibility and API checks
 
 New browser profiles show all providers. Scan and draft-generation selectors list
-**Codex**, **Claude Code**, **DeepSeek**, **OpenRouter**, and **xAI**; providers without
+**Codex**, **Claude Code**, **DeepSeek**, **OpenRouter**, **xAI**, and **Local AI**; providers without
 an account are visible but disabled.
 Use **Show or hide providers** in Accounts or beside a provider selector to customize
 the list. Existing browser preferences are preserved, so re-enable any providers
@@ -108,6 +112,6 @@ engine receives the actual credential when it starts a model harness.
 Next: configure the recommended [Codex provider](/ai-provider-setup/codex),
 [Claude Code](/ai-provider-setup/claude-code), or
 [DeepSeek](/ai-provider-setup/deepseek), [OpenRouter](/ai-provider-setup/openrouter),
-or [xAI](/ai-provider-setup/xai).
+[xAI](/ai-provider-setup/xai), or [Local AI](/ai-provider-setup/local-ai).
 
 Simultaneous requests to start a login for the same provider share one login session. Logins for different providers remain independent.
