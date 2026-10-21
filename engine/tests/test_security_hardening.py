@@ -155,6 +155,24 @@ def test_snapshot_scan_runner_uses_image_workspace_without_host_workspace_mount(
     assert command[command.index("open-kritt-workspace-snapshot:test") + 1 :][:2] == ["codex", "exec"]
 
 
+def test_deepseek_scan_runner_passes_api_key_by_name(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "engine-data" / "jobs" / "metadata-779" / "workspace"
+    home_dir = tmp_path / "engine-data" / "jobs" / "metadata-779" / "home"
+    repo_dir.mkdir(parents=True)
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(tmp_path / "engine-data"))
+    monkeypatch.setenv("ENGINE_DOCKER_DATA_DIR_HOST", str(tmp_path / "host-engine-data"))
+    monkeypatch.setattr(harnesses.shutil, "which", lambda name: "docker" if name == "docker" else None)
+
+    command = REAL_SCAN_DOCKER_COMMAND(
+        ["codex", "exec", "-"], str(repo_dir), {"HOME": str(home_dir), "DEEPSEEK_API_KEY": "deepseek-secret"}
+    )
+
+    envs = [command[index + 1] for index, value in enumerate(command) if value == "--env"]
+    assert "DEEPSEEK_API_KEY" in envs
+    assert not any("deepseek-secret" in value for value in command)
+
+
 def test_local_ai_scan_runner_maps_host_gateway_and_passes_only_named_env(monkeypatch, tmp_path):
     data_dir = tmp_path / "engine-data"
     repo_dir = data_dir / "jobs" / "metadata-778" / "workspace"

@@ -983,6 +983,7 @@ def _scan_docker_command(
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
         "LOCAL_AI_API_KEY",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
