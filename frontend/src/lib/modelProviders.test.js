@@ -310,10 +310,10 @@ describe('model provider harnesses', () => {
   });
 
   it('pairs Local AI with the Codex harness and free-text model IDs', () => {
-    expect(harnessesForModelProvider('local')).toEqual(['codex']);
-    expect(defaultHarnessForModelProvider('local')).toBe('codex');
+    expect(harnessesForModelProvider('local')).toEqual(['pi']);
+    expect(defaultHarnessForModelProvider('local')).toBe('pi');
     expect(usesFreeTextModelInput(null, 'local')).toBe(true);
-    expect(thinkingEffortsForModel(null, 'local', 'Qwen3.8-Flash-Next', [], 'codex')).toContain('default');
+    expect(thinkingEffortsForModel(null, 'local', 'Qwen3.8-Flash-Next', [], 'pi')).toContain('default');
   });
 
   it('pairs DeepSeek with the Codex harness', () => {

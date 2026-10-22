@@ -186,6 +186,14 @@ OPENROUTER_CODEX_BASE_URL = "https://openrouter.ai/api/v1"
 DEEPSEEK_CODEX_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CODEX_MODEL_CATALOG = "/app/open_kritt_engine/deepseek_models.json"
 LOCAL_AI_BASE_URL_MAX_LENGTH = 2048
+PI_THINKING_EFFORTS = frozenset({"low", "medium", "high"})
+PI_RUNTIME_ENV = {
+    # Scan inputs may be sensitive source code. Keep Pi from checking for
+    # updates, refreshing model catalogs, or sending install telemetry.
+    "PI_OFFLINE": "1",
+    "PI_SKIP_VERSION_CHECK": "1",
+    "PI_TELEMETRY": "0",
+}
 OPENROUTER_MODEL_ALIASES = {
     "glm-5.2": "z-ai/glm-5.2",
     "grok-4.5": "x-ai/grok-4.5",
@@ -449,6 +457,8 @@ def _command_harness(cmd: list[str]) -> str:
         return "claude-code"
     if "grok" in executables:
         return "grok-build"
+    if "pi" in executables:
+        return "pi"
     return Path(str(cmd[0])).name if cmd else "model"
 
 
@@ -974,6 +984,8 @@ def _scan_docker_command(
     }
     if _command_harness(cmd) == "grok-build":
         container_env.update(GROK_BUILD_RUNTIME_ENV)
+    if _command_harness(cmd) == "pi":
+        container_env.update(PI_RUNTIME_ENV)
     if Path(str(cmd[0])).name == "claude":
         # Claude Code refuses bypassPermissions as root unless the caller marks
         # the already-isolated container as a sandbox.
@@ -1138,19 +1150,6 @@ def local_ai_base_url(value: Any) -> str:
             code="configuration_error",
         )
     return url
-
-
-def _append_local_codex_config(command: list[str], base_url: str | None, *, api_key_configured: bool) -> None:
-    """Add the Codex provider definition for an OpenAI-compatible local server."""
-
-    command.extend(["-c", 'model_providers.local.name="Local AI"'])
-    command.extend(["-c", f"model_providers.local.base_url={json.dumps(local_ai_base_url(base_url))}"])
-    if api_key_configured:
-        # Most local servers accept unauthenticated requests. Codex fails when
-        # a declared env_key is missing, so declare it only when a key exists.
-        command.extend(["-c", 'model_providers.local.env_key="LOCAL_AI_API_KEY"'])
-    command.extend(["-c", 'model_providers.local.wire_api="responses"'])
-    command.extend(["-c", 'web_search="disabled"'])
 
 
 def claude_model_provider(
@@ -1699,7 +1698,6 @@ def codex_exec_command(
     codex_model_provider: str | None = None,
     max_subagents: int | None = None,
     fast_mode: bool = False,
-    env: dict[str, str] | None = None,
 ) -> list[str]:
     """Build a Codex exec command while preserving scan-mode compatibility."""
 
@@ -1712,7 +1710,7 @@ def codex_exec_command(
         model = OPENROUTER_MODEL_ALIASES.get(model, model)
     command = ["codex"]
     selected_provider = normalize_model_provider(model_provider)
-    if allow_tools and selected_provider not in {"deepseek", "local"}:
+    if allow_tools and selected_provider != "deepseek":
         command.append("--search")
     command.extend(["exec", "--json", "-C", repo_dir, "-m", model])
     if allow_tools:
@@ -1745,11 +1743,6 @@ def codex_exec_command(
         command.extend(["-c", 'model_providers.openrouter.wire_api="responses"'])
     if cli_model_provider == "deepseek":
         _append_deepseek_codex_config(command)
-    if cli_model_provider == "local":
-        job_env = env or {}
-        _append_local_codex_config(
-            command, job_env.get("LOCAL_AI_BASE_URL"), api_key_configured=bool(job_env.get("LOCAL_AI_API_KEY"))
-        )
     if cli_model_provider:
         command.extend(["-c", f"model_provider={json.dumps(cli_model_provider)}"])
     if thinking_effort and thinking_effort != "default":
@@ -1829,7 +1822,6 @@ class CodexHarness:
                 allow_tools=allow_tools,
                 max_subagents=self.max_subagents if allow_tools else None,
                 fast_mode=self.fast_mode,
-                env=actual_env,
             )
             if allow_tools:
                 cmd = _scan_docker_command(
@@ -1914,7 +1906,7 @@ class CodexHarness:
                     output_artifact=process_output,
                     provider=(
                         normalize_model_provider(self.model_provider)
-                        if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek", "local"}
+                        if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek"}
                         else None
                     ),
                 ) from payload_error
@@ -1955,10 +1947,6 @@ class CodexHarness:
         )
         if cli_model_provider == "deepseek":
             _append_deepseek_codex_config(cmd)
-        if cli_model_provider == "local":
-            _append_local_codex_config(
-                cmd, env.get("LOCAL_AI_BASE_URL"), api_key_configured=bool(env.get("LOCAL_AI_API_KEY"))
-            )
         if cli_model_provider:
             cmd.extend(["-c", f"model_provider={json.dumps(cli_model_provider)}"])
         if thinking_effort and thinking_effort != "default":
@@ -2008,7 +1996,7 @@ class CodexHarness:
                 output_artifact=process_output,
                 provider=(
                     normalize_model_provider(self.model_provider)
-                    if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek", "local"}
+                    if normalize_model_provider(self.model_provider) in {"openrouter", "deepseek"}
                     else None
                 ),
             ) from payload_error
@@ -2441,6 +2429,219 @@ class GrokBuildHarness:
                 prompt_path.unlink(missing_ok=True)
 
 
+def pi_agent_config(
+    base_url: Any, model: str, thinking_effort: str | None, *, api_key_configured: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return Pi's ``models.json`` and ``settings.json`` for the Local AI server."""
+
+    effort = (thinking_effort or "").strip().lower()
+    model_config: dict[str, Any] = {
+        "id": model,
+        "reasoning": True,
+        "input": ["text"],
+        # Pi's default thinking level is medium; send an effort only when the
+        # scan picked one so "default" keeps the server's own default.
+        "samplingParamsByThinkingLevel": (
+            {effort: {"reasoning_effort": effort, "chat_template_kwargs": {"reasoning_effort": effort}}}
+            if effort in PI_THINKING_EFFORTS
+            else {}
+        ),
+        "compat": {
+            "maxTokensField": "max_tokens",
+            "supportsDeveloperRole": False,
+            "supportsReasoningEffort": False,
+            "supportsStore": False,
+        },
+    }
+    models = {
+        "providers": {
+            "local": {
+                "name": "Local AI",
+                "baseUrl": local_ai_base_url(base_url),
+                "api": "openai-completions",
+                # Most local servers need no key, but Pi requires a value.
+                "apiKey": "$LOCAL_AI_API_KEY" if api_key_configured else "local",
+                "authHeader": api_key_configured,
+                "models": [model_config],
+            }
+        }
+    }
+    settings: dict[str, Any] = {"defaultProvider": "local", "defaultModel": model, "defaultProjectTrust": "never"}
+    if effort in PI_THINKING_EFFORTS:
+        settings["defaultThinkingLevel"] = effort
+    return models, settings
+
+
+def _pi_message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(block.get("text") or "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _extract_json_from_pi_events(stdout: str, schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read Pi's JSON event stream and return the final structured answer."""
+
+    messages = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, dict) and event.get("type") == "message_end" else None
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            messages.append(message)
+    if not messages:
+        raise json.JSONDecodeError("Pi returned no assistant message", stdout, 0)
+    final = messages[-1]
+    if final.get("stopReason") in {"error", "aborted"}:
+        raise _classified_harness_error(str(final.get("errorMessage") or final.get("stopReason")), harness="pi")
+    totals = {"input": 0, "cacheRead": 0, "output": 0, "reasoning": 0, "totalTokens": 0}
+    for message in messages:
+        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+        for key in totals:
+            value = usage.get(key)
+            totals[key] += value if isinstance(value, int) else 0
+    usage = {
+        "input_tokens": totals["input"] + totals["cacheRead"],
+        "cached_input_tokens": totals["cacheRead"],
+        "output_tokens": totals["output"],
+        "reasoning_output_tokens": totals["reasoning"],
+        "total_tokens": totals["totalTokens"],
+        "num_turns": len(messages),
+    }
+    last_error: Exception | None = None
+    for message in reversed(messages):
+        text = _pi_message_text(message)
+        if not text.strip():
+            continue
+        try:
+            return _parse_json_text(text, schema), usage
+        except (HarnessError, json.JSONDecodeError) as exc:
+            last_error = exc
+    raise HarnessError(
+        "Pi did not return a usable structured response.",
+        code="invalid_output",
+        harness="pi",
+    ) from last_error
+
+
+class PiHarness:
+    """Run Pi against the operator's OpenAI-compatible Local AI server."""
+
+    name = "pi"
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        model_provider: str | None = None,
+        runner_memory_mb: int = 0,
+        runner_memory_reservation_mb: int = 0,
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.model_provider = model_provider
+        self.runner_memory_mb = max(0, int(runner_memory_mb))
+        self.runner_memory_reservation_mb = max(0, int(runner_memory_reservation_mb))
+
+    def run(
+        self,
+        *,
+        prompt: str,
+        schema: dict[str, Any],
+        repo_dir: str,
+        model: str,
+        thinking_effort: str | None = None,
+        env: dict[str, str] | None = None,
+        allow_tools: bool = True,
+        runner_image: str | None = None,
+    ) -> HarnessResult:
+        actual_env = dict(env if env is not None else _base_env())
+        model_name = (model or "").strip()
+        if not model_name:
+            raise HarnessError("Choose a Local AI model for this scan.", code="configuration_error", harness="pi")
+        models, settings = pi_agent_config(
+            actual_env.get("LOCAL_AI_BASE_URL"),
+            model_name,
+            thinking_effort,
+            api_key_configured=bool(actual_env.get("LOCAL_AI_API_KEY")),
+        )
+        cmd = [
+            "pi",
+            "--print",
+            "--mode",
+            "json",
+            "--no-session",
+            # Scanned repositories are untrusted: never load their .pi
+            # settings, extensions, MCP servers, or AGENTS.md instructions.
+            "--no-approve",
+            "--no-extensions",
+            "--no-mcp",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--append-system-prompt",
+            CLAUDE_WORKSPACE_SYSTEM_PROMPT if allow_tools else CLAUDE_GENERATION_SYSTEM_PROMPT,
+        ]
+        if not allow_tools:
+            cmd.extend(["--no-tools", "--no-skills"])
+        home = actual_env.get("HOME")
+        with (
+            nullcontext(None)
+            if allow_tools and home
+            else tempfile.TemporaryDirectory(
+                prefix="open-kritt-pi-", dir=home if home and Path(home).is_dir() else None
+            )
+        ) as temporary_agent_dir:
+            if temporary_agent_dir is None:
+                # The per-job home is mounted as the runner's HOME, where Pi
+                # reads ~/.pi/agent and the scan's installed skills.
+                agent_dir = Path(home or "") / ".pi" / "agent"
+            else:
+                agent_dir = Path(temporary_agent_dir)
+                actual_env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+                actual_env.update(PI_RUNTIME_ENV)
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            for filename, config in (("models.json", models), ("settings.json", settings)):
+                path = agent_dir / filename
+                path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+                path.chmod(0o600)
+            if temporary_agent_dir is not None:
+                _grant_job_temp_access(temporary_agent_dir, actual_env)
+            run_cmd = (
+                _scan_docker_command(
+                    cmd,
+                    repo_dir,
+                    actual_env,
+                    runner_image=runner_image,
+                    memory_limit_mb=self.runner_memory_mb,
+                    memory_reservation_mb=self.runner_memory_reservation_mb,
+                )
+                if allow_tools
+                else cmd
+            )
+            proc = _run_process(run_cmd, prompt, repo_dir, self.timeout_seconds, env=actual_env)
+        process_output = _process_output(proc)
+        try:
+            payload, usage = _extract_json_from_pi_events(proc.stdout or "", schema)
+        except HarnessError as exc:
+            raise _harness_error_with_output(exc, process_output) from exc
+        except json.JSONDecodeError as exc:
+            raise _classified_harness_error(
+                f"{proc.stderr or ''}\n{proc.stdout or ''}",
+                harness="pi",
+                exit_code=getattr(proc, "returncode", None),
+                output_artifact=process_output,
+            ) from exc
+        usage = {**(usage or {}), "model_provider": "local", "local_model": model_name}
+        if thinking_effort:
+            usage["thinking_effort"] = thinking_effort
+        return HarnessResult(payload=payload, usage=usage, output=process_output)
+
+
 def normalize_harness_name(name: str) -> str:
     if name == "codex-cli":
         return "codex"
@@ -2492,6 +2693,13 @@ def harness_for(
         )
     if normalized == "grok-build":
         return GrokBuildHarness(
+            timeout_seconds,
+            provider,
+            runner_memory_mb=runner_memory_mb,
+            runner_memory_reservation_mb=runner_memory_reservation_mb,
+        )
+    if normalized == "pi":
+        return PiHarness(
             timeout_seconds,
             provider,
             runner_memory_mb=runner_memory_mb,

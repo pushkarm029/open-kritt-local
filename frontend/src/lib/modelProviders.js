@@ -10,7 +10,7 @@ const PROVIDER_HARNESSES = {
   openrouter: ['claude-code', 'codex'],
   xai: ['grok-build'],
   deepseek: ['codex'],
-  local: ['codex'],
+  local: ['pi'],
 };
 
 const PROVIDER_DEFAULT_MODELS = {
@@ -37,6 +37,7 @@ const HARNESS_THINKING_EFFORTS = {
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
   'grok-build': ['low', 'medium', 'high', 'xhigh'],
+  pi: ['default', 'low', 'medium', 'high'],
 };
 
 function normalizedProviderId(provider) {

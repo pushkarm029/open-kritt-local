@@ -49,7 +49,7 @@ export const PROVIDER_DEFINITIONS = {
     label: 'Local AI',
     envKeys: ['LOCAL_AI_BASE_URL'],
     credentialLabel: 'Server URL',
-    description: 'Self-hosted OpenAI-compatible models (Ollama, LM Studio, llama.cpp, vLLM) through the Codex harness.',
+    description: 'Self-hosted OpenAI-compatible models (Ollama, LM Studio, llama.cpp, vLLM) through the Pi harness.',
     management: 'endpoint',
   },
 };

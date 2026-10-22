@@ -21,7 +21,7 @@ disclosure process in [SECURITY.md](../SECURITY.md).
 
 Flow: UI → backend (create workflow/scan) → Postgres queue → **engine** checks out the
 target repo (+ dependency repos), builds a workspace, and runs each workflow step through
-an AI **harness** (`codex` / `claude-code` / `grok-build`), which sends repository
+an AI **harness** (`codex` / `claude-code` / `grok-build` / `pi`), which sends repository
 content to the **configured model/provider endpoint** → results are written back to
 Postgres → UI.
 
@@ -99,7 +99,8 @@ A compromised/injected agent could try to read credentials or send data out.
 Scanning sends code to an external endpoint by default.
 
 - Know **where your data goes** before scanning sensitive code. The supported setup paths
-  use Codex/OpenAI, Anthropic, OpenRouter, or xAI (Grok Build) credentials.
+  use Codex/OpenAI, Anthropic, OpenRouter, or xAI (Grok Build) credentials, or a
+  self-hosted Local AI server (Pi), where code goes only to the configured server URL.
 - Review provider data-retention terms for the endpoints you use.
 
 ### 4. Unauthenticated API exposure

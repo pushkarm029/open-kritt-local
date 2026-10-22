@@ -184,7 +184,7 @@ def test_local_ai_scan_runner_maps_host_gateway_and_passes_only_named_env(monkey
     monkeypatch.setattr(harnesses.shutil, "which", lambda name: "docker" if name == "docker" else None)
 
     local = REAL_SCAN_DOCKER_COMMAND(
-        ["codex", "exec", "-"],
+        ["pi", "--print", "--mode", "json"],
         str(repo_dir),
         {
             "HOME": str(home_dir),
@@ -340,6 +340,7 @@ def test_agent_cli_builds_use_exact_package_versions():
         assert "@openai/codex@0.145.0 \\\n    && codex --version" in dockerfiles[name]
         assert "@anthropic-ai/claude-code@2.1.215" in dockerfiles[name]
     assert "@anthropic-ai/claude-code@2.1.215" in dockerfiles["claude-runner"]
+    assert "@earendil-works/pi-coding-agent@1.4.0 \\\n    && pi --version" in dockerfiles["engine"]
     for name in ("engine", "backend"):
         assert "GROK_BUILD_VERSION=1.0.5" in dockerfiles[name]
         assert "https://x.ai/cli/grok-${GROK_BUILD_VERSION}-" in dockerfiles[name]

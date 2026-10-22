@@ -32,7 +32,8 @@ export default function ProviderVisibility({ configuredProviders = [], selected 
               />
               {label}
               {configuredProviders.includes(id) ? ' (configured)' : ''}
-              {id === 'deepseek' || id === 'local' ? ' · Codex harness' : ''}
+              {id === 'deepseek' ? ' · Codex harness' : ''}
+              {id === 'local' ? ' · Pi harness' : ''}
             </label>
           ))}
         </div>

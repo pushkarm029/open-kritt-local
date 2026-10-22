@@ -44,7 +44,7 @@ over their prompts, workflows, model providers, and infrastructure.
 
 - **Build workflows** — chain focused prompts into reusable security research playbooks.
 - **Run scans** — analyze remote or local repositories and their dependencies with Codex,
-  Claude Code, or Grok Build.
+  Claude Code, Grok Build, or Pi with a self-hosted model.
 - **Verify findings** — use post-scripts to validate issues, build proofs of concept, and
   produce reports.
 - **Export scan results** — package canonical findings, structured data, post-processing

@@ -1,31 +1,34 @@
 ---
 title: 'Local AI'
-description: 'Run scans and draft generation on a self-hosted OpenAI-compatible model server through Codex.'
+description: 'Run scans and draft generation on a self-hosted OpenAI-compatible model server through Pi.'
 ---
 
-The **Local AI** provider points the **Codex** harness at a model server you run
+The **Local AI** provider points the [Pi](https://pi.dev) coding agent at a model server you run
 yourself, such as Ollama, LM Studio, vLLM, or a server on another machine in your
 Tailscale network. Scans and workflow and post-script drafts can use it. Repository
 content goes only to the server you configure.
 
 ## Server requirements
 
-Codex talks to the server through the OpenAI **Responses API** (`POST /v1/responses`)
-and discovers models with `GET /v1/models`. Current Codex releases no longer support
-Chat Completions providers. A server that serves only `/v1/chat/completions` needs a
-Responses-compatible gateway in front of it, such as a LiteLLM proxy.
+Pi talks to the server through OpenAI **Chat Completions** (`POST /v1/chat/completions`)
+and open·kritt discovers models with `GET /v1/models`. Ollama, LM Studio, llama.cpp,
+vLLM, and SGLang all serve both. The model should support tool calling: scans run Pi as
+an agent with its `read`, `bash`, `edit`, and `write` tools inside the disposable scan
+runner. The server does not need structured-output support; the scan prompt carries the
+JSON Schema and the engine validates the answer.
 
-Recent Ollama, LM Studio, and vLLM releases serve `/v1/responses` themselves. The model
-should support tool calling; scans run Codex as an agent with shell and file tools
-inside the disposable scan runner. Codex's built-in web search is disabled for this
-provider.
+Pi runs with every repository-supplied resource disabled: project `.pi` settings,
+extensions, skills, prompt templates, MCP servers, and `AGENTS.md` or `CLAUDE.md`
+instructions are not loaded. It also runs offline, so it makes no update, catalog, or
+telemetry requests. Scan skills selected in open·kritt are installed into the job's
+own Pi configuration.
 
 ## Configure the server URL
 
 1. Open **Accounts**. If Local AI is hidden, select it under **Show or hide providers**.
 2. Select **Set server URL** and enter the server's `/v1` base URL.
 3. Create or duplicate a scan, choose **Local AI**, then pick a model from the live list
-   or type the exact model ID your server serves. Codex is selected as the harness.
+   or type the exact model ID your server serves. Pi is selected as the harness.
 
 The engine and scan runners run in Docker, so `localhost` refers to the container rather
 than your machine. Use `host.docker.internal` for a server on the Docker host:
@@ -52,7 +55,7 @@ LOCAL_AI_API_KEY=
 ```
 
 Accounts stores the URL in the protected provider credential file and mirrors it to
-`.env`. `LOCAL_AI_API_KEY` is read only from the environment. When it is empty, Codex
+`.env`. `LOCAL_AI_API_KEY` is read only from the environment. When it is empty, Pi
 sends requests without an `Authorization` header.
 
 ## Models and thinking effort
@@ -60,5 +63,6 @@ sends requests without an `Authorization` header.
 The engine refreshes the model list from `GET /v1/models` with the other catalogs. If
 the server is offline during a refresh, you can still type an exact model ID. The
 **default** thinking effort sends no reasoning setting, which suits most local models.
-`low`, `medium`, and `high` pass Codex's `model_reasoning_effort` through; servers that
-do not support it may ignore it or reject the request.
+`low`, `medium`, and `high` send the level both as `reasoning_effort` and as
+`chat_template_kwargs.reasoning_effort`, which covers OpenAI-style servers and servers
+whose chat template reads the effort. Servers that support neither ignore them.
