@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -2489,8 +2490,8 @@ def _pi_message_text(message: dict[str, Any]) -> str:
     )
 
 
-def _extract_json_from_pi_events(stdout: str, schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Read Pi's JSON event stream and return the final structured answer."""
+def _pi_run_summary(stdout: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Return the assistant messages and token usage from Pi's JSON event stream."""
 
     messages = []
     for line in stdout.splitlines():
@@ -2520,13 +2521,19 @@ def _extract_json_from_pi_events(stdout: str, schema: dict[str, Any]) -> tuple[d
         "total_tokens": totals["totalTokens"],
         "num_turns": len(messages),
     }
+    return messages, usage
+
+
+def _pi_structured_answer(messages: list[dict[str, Any]], schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the latest assistant answer that satisfies ``schema``."""
+
     last_error: Exception | None = None
     for message in reversed(messages):
         text = _pi_message_text(message)
         if not text.strip():
             continue
         try:
-            return _parse_json_text(text, schema), usage
+            return _parse_json_text(text, schema)
         except (HarnessError, json.JSONDecodeError) as exc:
             last_error = exc
     raise HarnessError(
@@ -2579,7 +2586,10 @@ class PiHarness:
             "--print",
             "--mode",
             "json",
-            "--no-session",
+            # The session lives in the per-job Pi agent directory and is
+            # removed with it; a repair turn continues it by this ID.
+            "--session-id",
+            str(uuid.uuid4()),
             # Scanned repositories are untrusted: never load their .pi
             # settings, extensions, MCP servers, or AGENTS.md instructions.
             "--no-approve",
@@ -2628,10 +2638,41 @@ class PiHarness:
                 if allow_tools
                 else cmd
             )
-            proc = _run_process(run_cmd, prompt, repo_dir, self.timeout_seconds, env=actual_env)
+            messages, usage, process_output = self._run_turn(run_cmd, prompt, repo_dir, actual_env)
+            try:
+                payload = _pi_structured_answer(messages, schema)
+            except HarnessError as exc:
+                # The agent finished but its answer did not match the schema.
+                # Ask the same session for the JSON instead of redoing the work.
+                repair_messages, repair_usage, repair_output = self._run_turn(
+                    run_cmd, _resume_json_prompt(schema), repo_dir, actual_env
+                )
+                process_output = _combine_harness_outputs(process_output, repair_output, secondary_name="resume")
+                try:
+                    payload = _pi_structured_answer(repair_messages, schema)
+                except HarnessError as repair_exc:
+                    raise HarnessError(
+                        f"{exc}; resume failed: {repair_exc}",
+                        output=process_output,
+                        code="invalid_output",
+                        harness="pi",
+                    ) from repair_exc
+                usage = {key: usage[key] + repair_usage[key] for key in usage}
+        usage = {
+            **usage,
+            "model_provider": "local",
+            "local_model": model_name,
+            "thinking_effort": PI_THINKING_EFFORT,
+        }
+        return HarnessResult(payload=payload, usage=usage, output=process_output)
+
+    def _run_turn(
+        self, run_cmd: list[str], prompt: str, repo_dir: str, env: dict[str, str]
+    ) -> tuple[list[dict[str, Any]], dict[str, int], HarnessOutput]:
+        proc = _run_process(run_cmd, prompt, repo_dir, self.timeout_seconds, env=env)
         process_output = _process_output(proc)
         try:
-            payload, usage = _extract_json_from_pi_events(proc.stdout or "", schema)
+            messages, usage = _pi_run_summary(proc.stdout or "")
         except HarnessError as exc:
             raise _harness_error_with_output(exc, process_output) from exc
         except json.JSONDecodeError as exc:
@@ -2641,13 +2682,7 @@ class PiHarness:
                 exit_code=getattr(proc, "returncode", None),
                 output_artifact=process_output,
             ) from exc
-        usage = {
-            **(usage or {}),
-            "model_provider": "local",
-            "local_model": model_name,
-            "thinking_effort": PI_THINKING_EFFORT,
-        }
-        return HarnessResult(payload=payload, usage=usage, output=process_output)
+        return messages, usage, process_output
 
 
 def normalize_harness_name(name: str) -> str:

@@ -141,7 +141,7 @@ def test_pi_scan_runs_in_runner_with_job_home_config(monkeypatch, tmp_path):
 
     cmd, prompt, env = calls[0]
     assert cmd[:3] == ["docker", "run", "open-kritt-engine:local"]
-    for flag in ("--no-approve", "--no-extensions", "--no-mcp", "--no-context-files", "--no-session"):
+    for flag in ("--no-approve", "--no-extensions", "--no-mcp", "--no-context-files", "--session-id"):
         assert flag in cmd
     assert "--no-tools" not in cmd
     assert prompt == "Scan this."
@@ -194,6 +194,7 @@ def test_pi_reports_server_errors_and_unparseable_answers(monkeypatch, tmp_path)
         [
             events(assistant("", stop="error", error="400: context_length_exceeded")),
             events(assistant("I could not finish.")),
+            events(assistant("Still no JSON.")),
             "",
         ]
     )
@@ -219,9 +220,37 @@ def test_pi_reports_server_errors_and_unparseable_answers(monkeypatch, tmp_path)
     with pytest.raises(HarnessError) as invalid:
         harness.run(**kwargs)
     assert invalid.value.code == "invalid_output"
+    assert "resume failed" in str(invalid.value)
     with pytest.raises(HarnessError) as empty:
         harness.run(**kwargs)
     assert empty.value.exit_code == 1
+
+
+def test_pi_repairs_a_schema_invalid_answer_in_the_same_session(monkeypatch, tmp_path):
+    calls = []
+    outputs = iter([events(assistant('{"stub": "yes"}')), events(assistant('{"stub": true}'))])
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        calls.append((cmd, prompt))
+        return SimpleNamespace(stdout=next(outputs), stderr="", returncode=0)
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+    result = PiHarness(timeout_seconds=5, model_provider="local").run(
+        prompt="Draft.",
+        schema=SCHEMA,
+        repo_dir=str(tmp_path),
+        model="m",
+        env={"HOME": str(tmp_path), "LOCAL_AI_BASE_URL": "http://localhost:1234/v1"},
+        allow_tools=False,
+    )
+
+    (first_cmd, _), (repair_cmd, repair_prompt) = calls
+    assert repair_cmd == first_cmd
+    assert "Return only the final JSON object now." in repair_prompt
+    assert result.payload == {"stub": True}
+    assert result.usage["num_turns"] == 2
+    assert result.usage["output_tokens"] == 40
+    assert "resume-stdout.txt" in result.output.files
 
 
 def test_pi_runner_gets_offline_settings(monkeypatch, tmp_path):

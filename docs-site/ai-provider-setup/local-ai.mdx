@@ -15,7 +15,10 @@ and open·kritt discovers models with `GET /v1/models`. Ollama, LM Studio, llama
 vLLM, and SGLang all serve both. The model should support tool calling: scans run Pi as
 an agent with its `read`, `bash`, `edit`, and `write` tools inside the disposable scan
 runner. The server does not need structured-output support; the scan prompt carries the
-JSON Schema and the engine validates the answer.
+JSON Schema and the engine validates the answer. If the answer does not match the
+schema, the engine continues the same Pi session once and asks for only the JSON, so the
+analysis is not redone. The session is stored in the job's own Pi directory and deleted
+with the job.
 
 Pi runs with every repository-supplied resource disabled: project `.pi` settings,
 extensions, skills, prompt templates, MCP servers, and `AGENTS.md` or `CLAUDE.md`
