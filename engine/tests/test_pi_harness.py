@@ -39,9 +39,9 @@ def events(*messages):
     return "\n".join([header, user, *messages, json.dumps({"type": "agent_settled", "aborted": False})])
 
 
-def test_local_ai_uses_only_the_pi_harness():
+def test_local_ai_uses_only_the_pi_harness_at_max_effort():
     assert MODEL_PROVIDER_HARNESSES["local"] == frozenset({"pi"})
-    assert HARNESS_THINKING_EFFORTS["pi"] == frozenset({"default", "low", "medium", "high"})
+    assert HARNESS_THINKING_EFFORTS["pi"] == frozenset({"max"})
     assert isinstance(harness_for("pi", timeout_seconds=5, model_provider="local"), PiHarness)
     job = {
         "kind": "workflow",
@@ -49,16 +49,19 @@ def test_local_ai_uses_only_the_pi_harness():
         "model": "Qwen3.8-Flash-Next",
         "model_provider": "local",
         "harness": "codex",
-        "thinking_effort": "default",
+        "thinking_effort": "max",
     }
     with pytest.raises(GenerationValidationError):
         validate_generation_job(job)
     job["harness"] = "pi"
     assert validate_generation_job(job)["harness"] == "pi"
+    job["thinking_effort"] = "medium"
+    with pytest.raises(GenerationValidationError):
+        validate_generation_job(job)
 
 
-def test_pi_config_targets_the_server_and_maps_only_the_selected_effort():
-    models, settings = pi_agent_config("https://spark.example.ts.net/v1/", "qwen3:8b", "high", api_key_configured=True)
+def test_pi_config_targets_the_server_with_max_effort_and_sampling():
+    models, settings = pi_agent_config("https://spark.example.ts.net/v1/", "qwen3:8b", api_key_configured=True, seed=7)
     provider = models["providers"]["local"]
 
     assert provider["baseUrl"] == "https://spark.example.ts.net/v1"
@@ -66,35 +69,27 @@ def test_pi_config_targets_the_server_and_maps_only_the_selected_effort():
     assert provider["apiKey"] == "$LOCAL_AI_API_KEY"
     assert provider["authHeader"] is True
     assert provider["models"][0]["id"] == "qwen3:8b"
-    assert provider["models"][0]["samplingParamsByThinkingLevel"] == {
-        "high": {"reasoning_effort": "high", "chat_template_kwargs": {"reasoning_effort": "high"}}
+    assert provider["models"][0]["samplingParams"] == {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "seed": 7,
+        "reasoning_effort": "max",
+        "chat_template_kwargs": {"reasoning_effort": "max"},
     }
-    assert settings == {
-        "defaultProvider": "local",
-        "defaultModel": "qwen3:8b",
-        "defaultProjectTrust": "never",
-        "defaultThinkingLevel": "high",
-    }
+    assert settings == {"defaultProvider": "local", "defaultModel": "qwen3:8b", "defaultProjectTrust": "never"}
 
-    assert provider["models"][0]["samplingParams"]["temperature"] == 0.6
-    assert provider["models"][0]["samplingParams"]["top_p"] == 0.95
-
-    models, settings = pi_agent_config(
-        "http://host.docker.internal:11434/v1", "m", "default", api_key_configured=False, seed=7
-    )
-    provider = models["providers"]["local"]
-    assert provider["models"][0]["samplingParams"] == {"temperature": 0.6, "top_p": 0.95, "seed": 7}
+    provider = pi_agent_config("http://host.docker.internal:11434/v1", "m", api_key_configured=False)[0]["providers"][
+        "local"
+    ]
     assert provider["apiKey"] == "local"
     assert provider["authHeader"] is False
-    assert provider["models"][0]["samplingParamsByThinkingLevel"] == {}
-    assert "defaultThinkingLevel" not in settings
 
 
 def test_pi_config_uses_a_new_seed_for_each_attempt():
     seeds = {
-        pi_agent_config("http://localhost:1234/v1", "m", None, api_key_configured=False)[0]["providers"]["local"][
-            "models"
-        ][0]["samplingParams"]["seed"]
+        pi_agent_config("http://localhost:1234/v1", "m", api_key_configured=False)[0]["providers"]["local"]["models"][
+            0
+        ]["samplingParams"]["seed"]
         for _ in range(5)
     }
     assert len(seeds) > 1
@@ -106,7 +101,7 @@ def test_pi_config_uses_a_new_seed_for_each_attempt():
 )
 def test_pi_config_rejects_missing_or_unsafe_server_urls(base_url):
     with pytest.raises(HarnessError) as exc_info:
-        pi_agent_config(base_url, "m", None, api_key_configured=False)
+        pi_agent_config(base_url, "m", api_key_configured=False)
     assert exc_info.value.code == "configuration_error"
 
 
@@ -136,7 +131,7 @@ def test_pi_scan_runs_in_runner_with_job_home_config(monkeypatch, tmp_path):
         schema=SCHEMA,
         repo_dir=str(tmp_path / "repo"),
         model="Qwen3.8-Flash-Next",
-        thinking_effort="medium",
+        thinking_effort="max",
         env={
             "HOME": str(home),
             "LOCAL_AI_BASE_URL": "https://spark.example.ts.net/v1",
@@ -156,14 +151,14 @@ def test_pi_scan_runs_in_runner_with_job_home_config(monkeypatch, tmp_path):
     models = json.loads((agent_dir / "models.json").read_text())
     assert "local-secret" not in (agent_dir / "models.json").read_text()
     assert models["providers"]["local"]["baseUrl"] == "https://spark.example.ts.net/v1"
-    assert json.loads((agent_dir / "settings.json").read_text())["defaultThinkingLevel"] == "medium"
+    assert models["providers"]["local"]["models"][0]["samplingParams"]["reasoning_effort"] == "max"
     assert result.payload["stub"] is True
     assert result.usage["input_tokens"] == 300
     assert result.usage["cached_input_tokens"] == 100
     assert result.usage["output_tokens"] == 40
     assert result.usage["num_turns"] == 2
     assert result.usage["model_provider"] == "local"
-    assert result.usage["thinking_effort"] == "medium"
+    assert result.usage["thinking_effort"] == "max"
 
 
 def test_pi_generation_is_tool_free_with_a_private_agent_dir(monkeypatch, tmp_path):

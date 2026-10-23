@@ -309,11 +309,11 @@ describe('model provider harnesses', () => {
     expect(defaultHarnessForModelProvider('xai')).toBe('grok-build');
   });
 
-  it('pairs Local AI with the Codex harness and free-text model IDs', () => {
+  it('pairs Local AI with the Pi harness at max effort and free-text model IDs', () => {
     expect(harnessesForModelProvider('local')).toEqual(['pi']);
     expect(defaultHarnessForModelProvider('local')).toBe('pi');
     expect(usesFreeTextModelInput(null, 'local')).toBe(true);
-    expect(thinkingEffortsForModel(null, 'local', 'Qwen3.8-Flash-Next', [], 'pi')).toContain('default');
+    expect(thinkingEffortsForModel(null, 'local', 'Qwen3.8-Flash-Next', [], 'pi')).toEqual(['max']);
   });
 
   it('pairs DeepSeek with the Codex harness', () => {

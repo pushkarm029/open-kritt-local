@@ -73,7 +73,7 @@ HARNESS_THINKING_EFFORTS = {
     "codex": frozenset({"default", "low", "medium", "high", "xhigh", "max", "ultra"}),
     "claude-code": frozenset({"default", "low", "medium", "high", "xhigh", "max"}),
     "grok-build": frozenset({"low", "medium", "high", "xhigh"}),
-    "pi": frozenset({"default", "low", "medium", "high"}),
+    "pi": frozenset({"max"}),
 }
 
 IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")

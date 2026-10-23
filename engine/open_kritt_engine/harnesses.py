@@ -187,7 +187,8 @@ OPENROUTER_CODEX_BASE_URL = "https://openrouter.ai/api/v1"
 DEEPSEEK_CODEX_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CODEX_MODEL_CATALOG = "/app/open_kritt_engine/deepseek_models.json"
 LOCAL_AI_BASE_URL_MAX_LENGTH = 2048
-PI_THINKING_EFFORTS = frozenset({"low", "medium", "high"})
+# Local AI always runs at the highest effort the server offers.
+PI_THINKING_EFFORT = "max"
 # Some self-hosted servers decode greedily when a request omits sampling
 # fields, which can make thinking models end a turn with reasoning and no
 # answer. These are the usual thinking-mode settings for open reasoning models.
@@ -2435,25 +2436,24 @@ class GrokBuildHarness:
 
 
 def pi_agent_config(
-    base_url: Any, model: str, thinking_effort: str | None, *, api_key_configured: bool, seed: int | None = None
+    base_url: Any, model: str, *, api_key_configured: bool, seed: int | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return Pi's ``models.json`` and ``settings.json`` for the Local AI server."""
 
-    effort = (thinking_effort or "").strip().lower()
     model_config: dict[str, Any] = {
         "id": model,
         "reasoning": True,
         "input": ["text"],
-        # A fresh seed per run lets engine retries sample a different answer
-        # from servers that otherwise return identical output for one request.
-        "samplingParams": {**PI_SAMPLING_PARAMS, "seed": secrets.randbelow(2**31) if seed is None else seed},
-        # Pi's default thinking level is medium; send an effort only when the
-        # scan picked one so "default" keeps the server's own default.
-        "samplingParamsByThinkingLevel": (
-            {effort: {"reasoning_effort": effort, "chat_template_kwargs": {"reasoning_effort": effort}}}
-            if effort in PI_THINKING_EFFORTS
-            else {}
-        ),
+        # Merged into every request. A fresh seed per run lets engine retries
+        # sample a different answer from servers that return identical output
+        # for one request. The effort goes in both fields: OpenAI-style servers
+        # read the top-level one, chat templates read the kwargs.
+        "samplingParams": {
+            **PI_SAMPLING_PARAMS,
+            "seed": secrets.randbelow(2**31) if seed is None else seed,
+            "reasoning_effort": PI_THINKING_EFFORT,
+            "chat_template_kwargs": {"reasoning_effort": PI_THINKING_EFFORT},
+        },
         "compat": {
             "maxTokensField": "max_tokens",
             "supportsDeveloperRole": False,
@@ -2474,9 +2474,7 @@ def pi_agent_config(
             }
         }
     }
-    settings: dict[str, Any] = {"defaultProvider": "local", "defaultModel": model, "defaultProjectTrust": "never"}
-    if effort in PI_THINKING_EFFORTS:
-        settings["defaultThinkingLevel"] = effort
+    settings = {"defaultProvider": "local", "defaultModel": model, "defaultProjectTrust": "never"}
     return models, settings
 
 
@@ -2574,7 +2572,6 @@ class PiHarness:
         models, settings = pi_agent_config(
             actual_env.get("LOCAL_AI_BASE_URL"),
             model_name,
-            thinking_effort,
             api_key_configured=bool(actual_env.get("LOCAL_AI_API_KEY")),
         )
         cmd = [
@@ -2644,9 +2641,12 @@ class PiHarness:
                 exit_code=getattr(proc, "returncode", None),
                 output_artifact=process_output,
             ) from exc
-        usage = {**(usage or {}), "model_provider": "local", "local_model": model_name}
-        if thinking_effort:
-            usage["thinking_effort"] = thinking_effort
+        usage = {
+            **(usage or {}),
+            "model_provider": "local",
+            "local_model": model_name,
+            "thinking_effort": PI_THINKING_EFFORT,
+        }
         return HarnessResult(payload=payload, usage=usage, output=process_output)
 
 

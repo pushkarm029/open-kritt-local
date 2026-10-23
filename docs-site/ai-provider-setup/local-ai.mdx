@@ -61,11 +61,13 @@ sends requests without an `Authorization` header.
 ## Models and thinking effort
 
 The engine refreshes the model list from `GET /v1/models` with the other catalogs. If
-the server is offline during a refresh, you can still type an exact model ID. The
-**default** thinking effort sends no reasoning setting, which suits most local models.
-`low`, `medium`, and `high` send the level both as `reasoning_effort` and as
+the server is offline during a refresh, you can still type an exact model ID.
+
+Local AI always runs at `max` thinking effort, the only level the UI and CLI offer for
+it. The level is sent both as `reasoning_effort` and as
 `chat_template_kwargs.reasoning_effort`, which covers OpenAI-style servers and servers
-whose chat template reads the effort. Servers that support neither ignore them.
+whose chat template reads the effort. Servers without `max` usually treat it as their
+highest level, and servers that support neither field ignore them.
 
 Every request also sets `temperature` 0.6 and `top_p` 0.95, the usual thinking-mode
 settings for open reasoning models. Some servers decode greedily when these are missing,

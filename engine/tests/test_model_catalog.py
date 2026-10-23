@@ -356,7 +356,7 @@ def test_fetch_local_models_lists_server_models_with_optional_key(monkeypatch):
     unauthenticated, _default = fetch_local_models("http://host.docker.internal:11434/v1", None, 2)
 
     assert [model["id"] for model in models] == ["Qwen3.8-Flash-Next"]
-    assert models[0]["thinkingEfforts"] == ["low", "medium", "high"]
+    assert models[0]["thinkingEfforts"] == ["max"]
     assert default_model == "Qwen3.8-Flash-Next"
     assert unauthenticated[0]["id"] == "Qwen3.8-Flash-Next"
     assert requests[0][0].full_url == "https://spark.example.ts.net/v1/models"

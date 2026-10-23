@@ -342,7 +342,7 @@ test('shared model availability enforces native catalogs and leaves OpenRouter u
   // An offline local server must not block an explicit model ID it serves.
   await assert.doesNotReject(() =>
     assertModelSelectionAvailable(
-      { modelProvider: 'local', model: 'Qwen3.8-Flash-Next', thinkingEffort: 'default' },
+      { modelProvider: 'local', model: 'Qwen3.8-Flash-Next', thinkingEffort: 'max' },
       {
         providerConfigured: async () => true,
         getCatalog: async () => null,
