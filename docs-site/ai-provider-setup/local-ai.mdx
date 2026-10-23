@@ -66,3 +66,9 @@ the server is offline during a refresh, you can still type an exact model ID. Th
 `low`, `medium`, and `high` send the level both as `reasoning_effort` and as
 `chat_template_kwargs.reasoning_effort`, which covers OpenAI-style servers and servers
 whose chat template reads the effort. Servers that support neither ignore them.
+
+Every request also sets `temperature` 0.6 and `top_p` 0.95, the usual thinking-mode
+settings for open reasoning models. Some servers decode greedily when these are missing,
+and a thinking model can then end a turn with reasoning but no answer. Each attempt also
+sends a new random `seed`, so a retry can produce a different answer on servers that
+otherwise return the same output for the same request.

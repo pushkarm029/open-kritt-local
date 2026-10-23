@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -187,6 +188,10 @@ DEEPSEEK_CODEX_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CODEX_MODEL_CATALOG = "/app/open_kritt_engine/deepseek_models.json"
 LOCAL_AI_BASE_URL_MAX_LENGTH = 2048
 PI_THINKING_EFFORTS = frozenset({"low", "medium", "high"})
+# Some self-hosted servers decode greedily when a request omits sampling
+# fields, which can make thinking models end a turn with reasoning and no
+# answer. These are the usual thinking-mode settings for open reasoning models.
+PI_SAMPLING_PARAMS = {"temperature": 0.6, "top_p": 0.95}
 PI_RUNTIME_ENV = {
     # Scan inputs may be sensitive source code. Keep Pi from checking for
     # updates, refreshing model catalogs, or sending install telemetry.
@@ -2430,7 +2435,7 @@ class GrokBuildHarness:
 
 
 def pi_agent_config(
-    base_url: Any, model: str, thinking_effort: str | None, *, api_key_configured: bool
+    base_url: Any, model: str, thinking_effort: str | None, *, api_key_configured: bool, seed: int | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return Pi's ``models.json`` and ``settings.json`` for the Local AI server."""
 
@@ -2439,6 +2444,9 @@ def pi_agent_config(
         "id": model,
         "reasoning": True,
         "input": ["text"],
+        # A fresh seed per run lets engine retries sample a different answer
+        # from servers that otherwise return identical output for one request.
+        "samplingParams": {**PI_SAMPLING_PARAMS, "seed": secrets.randbelow(2**31) if seed is None else seed},
         # Pi's default thinking level is medium; send an effort only when the
         # scan picked one so "default" keeps the server's own default.
         "samplingParamsByThinkingLevel": (

@@ -76,12 +76,28 @@ def test_pi_config_targets_the_server_and_maps_only_the_selected_effort():
         "defaultThinkingLevel": "high",
     }
 
-    models, settings = pi_agent_config("http://host.docker.internal:11434/v1", "m", "default", api_key_configured=False)
+    assert provider["models"][0]["samplingParams"]["temperature"] == 0.6
+    assert provider["models"][0]["samplingParams"]["top_p"] == 0.95
+
+    models, settings = pi_agent_config(
+        "http://host.docker.internal:11434/v1", "m", "default", api_key_configured=False, seed=7
+    )
     provider = models["providers"]["local"]
+    assert provider["models"][0]["samplingParams"] == {"temperature": 0.6, "top_p": 0.95, "seed": 7}
     assert provider["apiKey"] == "local"
     assert provider["authHeader"] is False
     assert provider["models"][0]["samplingParamsByThinkingLevel"] == {}
     assert "defaultThinkingLevel" not in settings
+
+
+def test_pi_config_uses_a_new_seed_for_each_attempt():
+    seeds = {
+        pi_agent_config("http://localhost:1234/v1", "m", None, api_key_configured=False)[0]["providers"]["local"][
+            "models"
+        ][0]["samplingParams"]["seed"]
+        for _ in range(5)
+    }
+    assert len(seeds) > 1
 
 
 @pytest.mark.parametrize(
