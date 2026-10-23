@@ -696,6 +696,18 @@ test('validateScan enforces model provider and harness compatibility after norma
   assert.equal(validateScan({ ...base, model_provider: 'xai', harness: 'grok' }).harness, 'grok-build');
   assert.equal(validateScan({ ...base, model_provider: 'xai', harness: 'grok-build' }).modelProvider, 'xai');
   assert.equal(validateScan({ ...base, model_provider: 'deepseek', harness: 'codex' }).modelProvider, 'deepseek');
+  const localPi = {
+    ...base,
+    model_provider: 'local',
+    harness: 'pi',
+    thinking_effort: 'max',
+    post_processing_thinking_effort: 'max',
+  };
+  assert.equal(validateScan(localPi).harness, 'pi');
+  assert.throws(
+    () => validateScan({ ...localPi, thinking_effort: 'medium' }),
+    (error) => error.errors?.some((item) => item.field === 'thinking_effort')
+  );
   assert.equal(
     validateScan({ ...base, model_provider: 'xai', harness: 'grok-build', thinking_effort: 'xhigh' }).thinkingEffort,
     'xhigh'
@@ -736,6 +748,8 @@ test('validateScan enforces model provider and harness compatibility after norma
     ['xai', 'claude-code'],
     ['deepseek', 'claude-code'],
     ['deepseek', 'grok-build'],
+    ['local', 'codex'],
+    ['codex', 'pi'],
   ]) {
     assert.throws(
       () => validateScan({ ...base, model_provider, harness }),

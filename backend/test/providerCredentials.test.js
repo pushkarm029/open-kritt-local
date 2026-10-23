@@ -112,6 +112,36 @@ test('credential validation accepts only a single-line API key for managed provi
   assert.equal(validateProviderCredential('xai', 'one\ntwo').field, 'credential');
 });
 
+test('Local AI credential validation accepts only http(s) server URLs', () => {
+  assert.equal(validateProviderCredential('local', 'http://host.docker.internal:11434/v1'), null);
+  assert.equal(validateProviderCredential('local', 'https://spark.example.ts.net/v1'), null);
+  for (const value of ['localhost:11434/v1', 'ftp://host/v1', 'file:///etc/passwd', 'http://host/v1"x', 'not a url']) {
+    assert.equal(validateProviderCredential('local', value).field, 'credential', value);
+  }
+  assert.equal(validateProviderCredential('local', ' ').message, 'Enter a server URL.');
+});
+
+test('Local AI status reports a managed server URL as an endpoint provider', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'open-kritt-local-ai-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const credentialsPath = join(directory, 'providers.json');
+  await saveManagedProviderCredential('local', ' https://spark.example.ts.net/v1 ', {
+    credentialsPath,
+    environmentFilePath: join(directory, '.env'),
+  });
+
+  const local = providerCredentialStatuses({ env: {}, credentialsPath }).find((provider) => provider.id === 'local');
+  assert.equal(local.configured, true);
+  assert.equal(local.management, 'endpoint');
+  assert.equal(local.canManage, true);
+  assert.equal(local.apiKeyPath, 'LOCAL_AI_BASE_URL');
+  assert.equal(readManagedCredentialStateSync(credentialsPath).credentials.local, 'https://spark.example.ts.net/v1');
+  assert.match(
+    await readFile(join(directory, '.env'), 'utf8'),
+    /^LOCAL_AI_BASE_URL=https:\/\/spark\.example\.ts\.net\/v1$/m
+  );
+});
+
 test('provider status recognizes Codex and Claude login homes', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'open-kritt-provider-logins-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

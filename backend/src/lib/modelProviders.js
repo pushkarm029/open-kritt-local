@@ -8,6 +8,7 @@ const PROVIDER_CREDENTIALS = {
   openrouter: ['OPENROUTER_API_KEY'],
   xai: ['XAI_API_KEY'],
   deepseek: ['DEEPSEEK_API_KEY'],
+  local: ['LOCAL_AI_BASE_URL'],
 };
 
 function hasValue(value) {

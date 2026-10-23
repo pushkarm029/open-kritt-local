@@ -152,10 +152,12 @@ def prepare_job_workspace(
     codex_home = home / ".codex"
     claude_home = home / ".claude"
     grok_home = home / ".grok"
+    pi_agent_dir = home / ".pi" / "agent"
     claude_oauth_expires_at_ms = None
     needs_codex_home = selected_harness == "codex"
     needs_claude_home = selected_harness == "claude-code"
     needs_grok_home = selected_harness == "grok-build"
+    needs_pi_agent_dir = selected_harness == "pi"
     codex_source = (
         provider_home_for_job("codex", metadata_id, data_dir=data_dir)
         if needs_codex_home and selected_provider == "codex"
@@ -205,6 +207,8 @@ def prepare_job_workspace(
         _install_agent_skills(claude_home, agent_skills or [])
     if needs_grok_home:
         _install_agent_skills(grok_home, agent_skills or [])
+    if needs_pi_agent_dir:
+        _install_agent_skills(pi_agent_dir, agent_skills or [])
     job_uid, job_gid = _job_identity(metadata_id)
     env = job_environment(selected_provider, selected_harness)
     env.update(

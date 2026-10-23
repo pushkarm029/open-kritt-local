@@ -74,6 +74,11 @@ test('configured provider checks accept local raw credentials', () => {
   assert.equal(isModelProviderConfigured('codex', { env }), true);
   assert.equal(isModelProviderConfigured('claude', { env }), false);
   assert.equal(isModelProviderConfigured('deepseek', { env: { DEEPSEEK_API_KEY: 'local-key' } }), true);
+  assert.equal(
+    isModelProviderConfigured('local', { env: { LOCAL_AI_BASE_URL: 'http://host.docker.internal:11434/v1' } }),
+    true
+  );
+  assert.equal(isModelProviderConfigured('local', { env: { LOCAL_AI_API_KEY: 'key-without-server' } }), false);
 });
 
 test('model provider API exposes configured IDs and rejects unavailable scan providers', async (t) => {

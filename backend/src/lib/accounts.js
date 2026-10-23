@@ -317,9 +317,9 @@ export function buildAccountsOverview(statuses, executorAccounts, activity = [])
           {
             id: `${status.id}-api-key`,
             path: status.apiKeyPath,
-            label: `${status.label} API key`,
+            label: status.management === 'endpoint' ? `${status.label} server` : `${status.label} API key`,
             active: true,
-            status: 'key configured',
+            status: status.management === 'endpoint' ? 'server configured' : 'key configured',
             statusKind: 'available',
           },
           status.id,
@@ -364,7 +364,7 @@ export function getAccountsSummary({ statusOptions } = {}) {
 export async function getAccountProvider(providerId, { refresh = false, statusOptions, executorOptions } = {}) {
   const status = providerCredentialStatuses(statusOptions).find((provider) => provider.id === providerId);
   if (!status) return null;
-  if (providerId === 'deepseek') {
+  if (providerId === 'deepseek' || providerId === 'local') {
     return { ...buildAccountsOverview([status], null, readAccountActivity()).providers[0], loadError: null };
   }
   const executorProvider = await fetchExecutorProvider(providerId, { refresh, ...executorOptions });

@@ -17,11 +17,13 @@ export const PROVIDER_KEYS = [
 export const CODEX_LOGIN_STATUS_KEY = 'CODEX_LOGIN_CONFIGURED';
 export const MANAGED_PROVIDER_ENV_KEYS = {
   deepseek: 'DEEPSEEK_API_KEY',
+  local: 'LOCAL_AI_BASE_URL',
   openrouter: 'OPENROUTER_API_KEY',
   xai: 'XAI_API_KEY',
 };
 export const MANAGED_PROVIDER_LABELS = {
   deepseek: 'DeepSeek API key',
+  local: 'Local AI server URL',
   openrouter: 'OpenRouter API key',
   xai: 'xAI API key',
 };
@@ -578,6 +580,8 @@ export async function getSetupStatus({ rootDir, envFile = join(rootDir, '.env'),
   const managedProviders = Object.keys(managedState.credentials);
   const providerPresent =
     PROVIDER_KEYS.some((key) => valuesPresent[key]) ||
+    // Local AI is configured from Accounts or .env rather than a setup prompt.
+    (Boolean(values.LOCAL_AI_BASE_URL) && !disabledProviders.includes('local')) ||
     codexLoginPresent ||
     claudeLoginPresent ||
     managedProviders.length > 0;

@@ -155,6 +155,52 @@ def test_snapshot_scan_runner_uses_image_workspace_without_host_workspace_mount(
     assert command[command.index("open-kritt-workspace-snapshot:test") + 1 :][:2] == ["codex", "exec"]
 
 
+def test_deepseek_scan_runner_passes_api_key_by_name(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "engine-data" / "jobs" / "metadata-779" / "workspace"
+    home_dir = tmp_path / "engine-data" / "jobs" / "metadata-779" / "home"
+    repo_dir.mkdir(parents=True)
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(tmp_path / "engine-data"))
+    monkeypatch.setenv("ENGINE_DOCKER_DATA_DIR_HOST", str(tmp_path / "host-engine-data"))
+    monkeypatch.setattr(harnesses.shutil, "which", lambda name: "docker" if name == "docker" else None)
+
+    command = REAL_SCAN_DOCKER_COMMAND(
+        ["codex", "exec", "-"], str(repo_dir), {"HOME": str(home_dir), "DEEPSEEK_API_KEY": "deepseek-secret"}
+    )
+
+    envs = [command[index + 1] for index, value in enumerate(command) if value == "--env"]
+    assert "DEEPSEEK_API_KEY" in envs
+    assert not any("deepseek-secret" in value for value in command)
+
+
+def test_local_ai_scan_runner_maps_host_gateway_and_passes_only_named_env(monkeypatch, tmp_path):
+    data_dir = tmp_path / "engine-data"
+    repo_dir = data_dir / "jobs" / "metadata-778" / "workspace"
+    home_dir = data_dir / "jobs" / "metadata-778" / "home"
+    repo_dir.mkdir(parents=True)
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ENGINE_DOCKER_DATA_DIR_HOST", str(tmp_path / "host-engine-data"))
+    monkeypatch.setattr(harnesses.shutil, "which", lambda name: "docker" if name == "docker" else None)
+
+    local = REAL_SCAN_DOCKER_COMMAND(
+        ["pi", "--print", "--mode", "json"],
+        str(repo_dir),
+        {
+            "HOME": str(home_dir),
+            "LOCAL_AI_BASE_URL": "http://host.docker.internal:11434/v1",
+            "LOCAL_AI_API_KEY": "local-secret",
+        },
+    )
+    other = REAL_SCAN_DOCKER_COMMAND(["codex", "exec", "-"], str(repo_dir), {"HOME": str(home_dir)})
+
+    assert local[local.index("--add-host") + 1] == "host.docker.internal:host-gateway"
+    envs = [local[index + 1] for index, value in enumerate(local) if value == "--env"]
+    assert "LOCAL_AI_API_KEY" in envs
+    assert not any("local-secret" in value for value in local)
+    assert "--add-host" not in other
+
+
 def test_prewarm_rebuilds_previous_marker_version_instead_of_promoting_it(monkeypatch, tmp_path):
     stale_base = tmp_path / "cache" / "owner__repo@HEAD"
     stale_repo = stale_base / "owner__repo"
@@ -294,6 +340,7 @@ def test_agent_cli_builds_use_exact_package_versions():
         assert "@openai/codex@0.145.0 \\\n    && codex --version" in dockerfiles[name]
         assert "@anthropic-ai/claude-code@2.1.215" in dockerfiles[name]
     assert "@anthropic-ai/claude-code@2.1.215" in dockerfiles["claude-runner"]
+    assert "@earendil-works/pi-coding-agent@1.4.0 \\\n    && pi --version" in dockerfiles["engine"]
     for name in ("engine", "backend"):
         assert "GROK_BUILD_VERSION=1.0.5" in dockerfiles[name]
         assert "https://x.ai/cli/grok-${GROK_BUILD_VERSION}-" in dockerfiles[name]

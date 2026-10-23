@@ -134,7 +134,8 @@ export default function Accounts() {
   };
 
   const remove = async (provider) => {
-    if (!window.confirm(`Remove the ${provider.label} API key from open·kritt?`)) return;
+    const credential = provider.management === 'endpoint' ? 'server URL' : 'API key';
+    if (!window.confirm(`Remove the ${provider.label} ${credential} from open·kritt?`)) return;
     const previous = data;
     setData(removeProviderFromOverview(data, provider.id));
     try {
@@ -265,7 +266,7 @@ export default function Accounts() {
       {editing?.management === 'login' && (
         <LoginDialog provider={editing} onClose={() => setEditing(null)} onComplete={() => load(true)} />
       )}
-      {(editing?.management === 'api_key' || editingKey) && (
+      {(editing?.management === 'api_key' || editing?.management === 'endpoint' || editingKey) && (
         <CredentialDialog
           provider={editingKey || editing}
           onClose={() => {
@@ -393,7 +394,9 @@ export function ProviderCard({
                 ? `Refresh or reconnect ${provider.label} to load its accounts.`
                 : provider.management === 'login'
                   ? `Sign in to ${provider.label} to make this provider available.`
-                  : `Add ${provider.credentialLabel.toLowerCase()} to make this provider available.`}
+                  : provider.management === 'endpoint'
+                    ? `Set the ${provider.label} server URL to make this provider available.`
+                    : `Add ${provider.credentialLabel.toLowerCase()} to make this provider available.`}
             </div>
           </div>
         )}
@@ -412,7 +415,7 @@ export function ProviderCard({
         )}
         {provider.canRemove && (
           <Button variant="ghost" onClick={onRemove}>
-            Remove key
+            {provider.management === 'endpoint' ? 'Remove server' : 'Remove key'}
           </Button>
         )}
         {PROVIDER_LINKS[provider.id] && (
@@ -426,6 +429,7 @@ export function ProviderCard({
 }
 
 export function providerActionLabel(provider) {
+  if (provider.management === 'endpoint') return provider.configured ? 'Change server URL' : 'Set server URL';
   if (provider.management !== 'login') {
     if (provider.configured) return 'Add or replace key';
     const credential = `${provider.credentialLabel || ''}`.trim();
@@ -512,7 +516,8 @@ export function removeProviderFromOverview(overview, providerId) {
 }
 
 function ProviderMark({ provider }) {
-  const label = { codex: 'CX', claude: 'CL', xai: 'XA', openrouter: 'OR', deepseek: 'DS' }[provider] || provider;
+  const label =
+    { codex: 'CX', claude: 'CL', xai: 'XA', openrouter: 'OR', deepseek: 'DS', local: 'LO' }[provider] || provider;
   return <span className={`mono account-provider-mark account-provider-mark-${provider}`}>{label}</span>;
 }
 
@@ -1100,6 +1105,7 @@ function loginStatusLabel(status) {
 }
 
 function CredentialDialog({ provider, onClose, onSave }) {
+  const endpoint = provider.management === 'endpoint';
   const inputRef = useRef(null);
   const [credential, setCredential] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1115,7 +1121,7 @@ function CredentialDialog({ provider, onClose, onSave }) {
   const submit = async (event) => {
     event.preventDefault();
     if (!credential.trim()) {
-      setError('Enter an API key.');
+      setError(endpoint ? 'Enter a server URL.' : 'Enter an API key.');
       return;
     }
     setSaving(true);
@@ -1144,7 +1150,13 @@ function CredentialDialog({ provider, onClose, onSave }) {
           <div>
             <div className="mono account-kicker">{provider.label}</div>
             <div id="account-dialog-title" style={{ fontSize: 20, fontWeight: 600, marginTop: 5 }}>
-              {provider.configured ? 'Add or replace API key' : 'Add account'}
+              {endpoint
+                ? provider.configured
+                  ? 'Change server URL'
+                  : 'Set server URL'
+                : provider.configured
+                  ? 'Add or replace API key'
+                  : 'Add account'}
             </div>
           </div>
           <button className="account-dialog-close" type="button" aria-label="Close" onClick={onClose}>
@@ -1158,16 +1170,18 @@ function CredentialDialog({ provider, onClose, onSave }) {
         <input
           ref={inputRef}
           id="provider-credential"
-          type="password"
+          type={endpoint ? 'url' : 'password'}
           autoComplete="off"
           spellCheck="false"
           value={credential}
           onChange={(event) => setCredential(event.target.value)}
-          placeholder="Paste key"
+          placeholder={endpoint ? 'http://host.docker.internal:11434/v1' : 'Paste key'}
           className="account-credential-input mono"
         />
         <div style={{ color: 'var(--text-2)', fontSize: 11.5, lineHeight: 1.5, marginTop: 8 }}>
-          Stored locally with restricted file permissions. The value is sent once and is never displayed again.
+          {endpoint
+            ? 'An OpenAI-compatible /v1 URL. Scans run in Docker, so use host.docker.internal instead of localhost for a server on this machine. Set LOCAL_AI_API_KEY in .env if the server requires a key.'
+            : 'Stored locally with restricted file permissions. The value is sent once and is never displayed again.'}
         </div>
         {error && <div className="account-dialog-error">{error}</div>}
 
@@ -1176,7 +1190,7 @@ function CredentialDialog({ provider, onClose, onSave }) {
             Cancel
           </Button>
           <Button type="submit" disabled={saving}>
-            {saving ? 'Saving…' : 'Save account'}
+            {saving ? 'Saving…' : endpoint ? 'Save server' : 'Save account'}
           </Button>
         </div>
       </form>

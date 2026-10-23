@@ -1,0 +1,79 @@
+---
+title: 'Local AI'
+description: 'Run scans and draft generation on a self-hosted OpenAI-compatible model server through Pi.'
+---
+
+The **Local AI** provider points the [Pi](https://pi.dev) coding agent at a model server you run
+yourself, such as Ollama, LM Studio, vLLM, or a server on another machine in your
+Tailscale network. Scans and workflow and post-script drafts can use it. Repository
+content goes only to the server you configure.
+
+## Server requirements
+
+Pi talks to the server through OpenAI **Chat Completions** (`POST /v1/chat/completions`)
+and open·kritt discovers models with `GET /v1/models`. Ollama, LM Studio, llama.cpp,
+vLLM, and SGLang all serve both. The model should support tool calling: scans run Pi as
+an agent with its `read`, `bash`, `edit`, and `write` tools inside the disposable scan
+runner. The server does not need structured-output support; the scan prompt carries the
+JSON Schema and the engine validates the answer. If the answer does not match the
+schema, the engine continues the same Pi session once and asks for only the JSON, so the
+analysis is not redone. The session is stored in the job's own Pi directory and deleted
+with the job.
+
+Pi runs with every repository-supplied resource disabled: project `.pi` settings,
+extensions, skills, prompt templates, MCP servers, and `AGENTS.md` or `CLAUDE.md`
+instructions are not loaded. It also runs offline, so it makes no update, catalog, or
+telemetry requests. Scan skills selected in open·kritt are installed into the job's
+own Pi configuration.
+
+## Configure the server URL
+
+1. Open **Accounts**. If Local AI is hidden, select it under **Show or hide providers**.
+2. Select **Set server URL** and enter the server's `/v1` base URL.
+3. Create or duplicate a scan, choose **Local AI**, then pick a model from the live list
+   or type the exact model ID your server serves. Pi is selected as the harness.
+
+The engine and scan runners run in Docker, so `localhost` refers to the container rather
+than your machine. Use `host.docker.internal` for a server on the Docker host:
+
+| Server | Example URL |
+| --- | --- |
+| Ollama | `http://host.docker.internal:11434/v1` |
+| LM Studio | `http://host.docker.internal:1234/v1` |
+| vLLM | `http://host.docker.internal:8000/v1` |
+| Tailscale host | `https://<machine>.<tailnet>.ts.net/v1` |
+
+Compose maps `host.docker.internal` to the host gateway for the engine and for every
+Local AI scan runner, so the same URL also works on Linux. A Linux host server must
+listen on an address the Docker bridge can reach, for example `OLLAMA_HOST=0.0.0.0`.
+For a Tailscale MagicDNS name, the Docker host must resolve it: enable **Use Tailscale
+DNS** (`tailscale set --accept-dns=true`) on that machine.
+
+You can also set the URL in `.env` instead of Accounts:
+
+```bash
+LOCAL_AI_BASE_URL=http://host.docker.internal:11434/v1
+# Only for servers that require a key, for example vLLM started with --api-key.
+LOCAL_AI_API_KEY=
+```
+
+Accounts stores the URL in the protected provider credential file and mirrors it to
+`.env`. `LOCAL_AI_API_KEY` is read only from the environment. When it is empty, Pi
+sends requests without an `Authorization` header.
+
+## Models and thinking effort
+
+The engine refreshes the model list from `GET /v1/models` with the other catalogs. If
+the server is offline during a refresh, you can still type an exact model ID.
+
+Local AI always runs at `max` thinking effort, the only level the UI and CLI offer for
+it. The level is sent both as `reasoning_effort` and as
+`chat_template_kwargs.reasoning_effort`, which covers OpenAI-style servers and servers
+whose chat template reads the effort. Servers without `max` usually treat it as their
+highest level, and servers that support neither field ignore them.
+
+Every request also sets `temperature` 0.6 and `top_p` 0.95, the usual thinking-mode
+settings for open reasoning models. Some servers decode greedily when these are missing,
+and a thinking model can then end a turn with reasoning but no answer. Each attempt also
+sends a new random `seed`, so a retry can produce a different answer on servers that
+otherwise return the same output for the same request.

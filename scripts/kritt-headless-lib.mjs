@@ -23,6 +23,7 @@ const PROVIDER_HARNESSES = Object.freeze({
   openrouter: ['claude-code', 'codex'],
   xai: ['grok-build'],
   deepseek: ['codex'],
+  local: ['pi'],
 });
 const PROVIDER_EFFORTS = Object.freeze({
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
@@ -30,11 +31,13 @@ const PROVIDER_EFFORTS = Object.freeze({
   openrouter: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
   xai: ['low', 'medium', 'high', 'xhigh'],
   deepseek: ['low', 'high', 'max'],
+  local: ['max'],
 });
 const HARNESS_EFFORTS = Object.freeze({
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
   'grok-build': ['low', 'medium', 'high', 'xhigh'],
+  pi: ['max'],
 });
 const RESOURCE_IMPORTS = Object.freeze({
   workflow: Object.freeze({
@@ -471,7 +474,7 @@ async function chooseModelSelection(prompter, providers, catalogs, { prefix = ''
   const catalog = catalogs.get(provider) || {};
   const models = Array.isArray(catalog.models) ? catalog.models.filter((model) => model?.id) : [];
   let model;
-  if (catalog.input === 'text' || provider === 'openrouter' || provider === 'xai') {
+  if (catalog.input === 'text' || provider === 'openrouter' || provider === 'xai' || provider === 'local') {
     model = await prompter.ask(`${prefix}Exact model ID`, {
       defaultValue: fallback?.model || catalog.defaultModel || models[0]?.id || '',
       required: true,

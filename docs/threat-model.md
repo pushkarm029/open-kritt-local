@@ -21,7 +21,7 @@ disclosure process in [SECURITY.md](../SECURITY.md).
 
 Flow: UI → backend (create workflow/scan) → Postgres queue → **engine** checks out the
 target repo (+ dependency repos), builds a workspace, and runs each workflow step through
-an AI **harness** (`codex` / `claude-code` / `grok-build`), which sends repository
+an AI **harness** (`codex` / `claude-code` / `grok-build` / `pi`), which sends repository
 content to the **configured model/provider endpoint** → results are written back to
 Postgres → UI.
 
@@ -72,8 +72,9 @@ Natural-language workflow and post-script generation requests are also untrusted
   writable per-job checkout, a copied job home, and a dedicated Docker network. The job
   does not mount the Docker socket, database, project `.env`, or other jobs. Harness output
   is schema-constrained JSON. Draft-generation calls run with model tools, user
-  rules/settings, and session persistence disabled; engine and backend validators reject
-  malformed drafts before they reach an editor or resource table.
+  rules/settings, and session persistence disabled (Pi keeps its session only in the
+  call's private temporary directory, removed when the call ends); engine and backend
+  validators reject malformed drafts before they reach an editor or resource table.
 - **Deliberate capability:** scan agents run as root in their job container, may use Bash,
   install packages, compile or test the target, and access the internet directly. A job
   container is not a security boundary against a kernel or container-runtime exploit.
@@ -99,7 +100,8 @@ A compromised/injected agent could try to read credentials or send data out.
 Scanning sends code to an external endpoint by default.
 
 - Know **where your data goes** before scanning sensitive code. The supported setup paths
-  use Codex/OpenAI, Anthropic, OpenRouter, or xAI (Grok Build) credentials.
+  use Codex/OpenAI, Anthropic, OpenRouter, or xAI (Grok Build) credentials, or a
+  self-hosted Local AI server (Pi), where code goes only to the configured server URL.
 - Review provider data-retention terms for the endpoints you use.
 
 ### 4. Unauthenticated API exposure

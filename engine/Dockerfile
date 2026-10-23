@@ -15,6 +15,8 @@ RUN apt-get update \
     && npm install --global --no-audit --no-fund @openai/codex@0.145.0 \
     && codex --version \
     && npm install --global --no-audit --no-fund --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.215 \
+    && npm install --global --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0 \
+    && pi --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

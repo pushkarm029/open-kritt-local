@@ -324,6 +324,8 @@ def test_generation_environment_contains_only_selected_provider_credentials():
         "DEEPSEEK_API_KEY": "deepseek-secret",
         "OPENROUTER_API_KEY": "openrouter-secret",
         "XAI_API_KEY": "xai-secret",
+        "LOCAL_AI_BASE_URL": "http://host.docker.internal:11434/v1",
+        "LOCAL_AI_API_KEY": "local-secret",
         "GITHUB_TOKEN": "github-secret",
         "DATABASE_URL": "database-secret",
     }
@@ -332,6 +334,7 @@ def test_generation_environment_contains_only_selected_provider_credentials():
     openrouter_env = generation_environment("openrouter", source)
     deepseek_env = generation_environment("deepseek", source)
     xai_env = generation_environment("xai", source)
+    local_env = generation_environment("local", source)
 
     assert codex_env["CODEX_API_KEY"] == "openai-secret"
     assert codex_env["CODEX_HOME"] == "/codex-a"
@@ -341,7 +344,11 @@ def test_generation_environment_contains_only_selected_provider_credentials():
     assert deepseek_env["DEEPSEEK_API_KEY"] == "deepseek-secret"
     assert xai_env["XAI_API_KEY"] == "xai-secret"
     assert "OPENROUTER_API_KEY" not in xai_env
-    for env in (codex_env, openrouter_env, deepseek_env, xai_env):
+    assert local_env["LOCAL_AI_BASE_URL"] == "http://host.docker.internal:11434/v1"
+    assert local_env["LOCAL_AI_API_KEY"] == "local-secret"
+    assert "OPENAI_API_KEY" not in local_env
+    assert "LOCAL_AI_API_KEY" not in codex_env
+    for env in (codex_env, openrouter_env, deepseek_env, xai_env, local_env):
         assert "GITHUB_TOKEN" not in env
         assert "DATABASE_URL" not in env
 

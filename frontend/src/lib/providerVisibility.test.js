@@ -20,7 +20,7 @@ function fixture() {
 describe('provider presentation preferences', () => {
   it('shows all supported providers by default and recovers from malformed storage', () => {
     for (const value of [undefined, null, 'broken', '{}', '{"version":2,"visible":[]}']) {
-      expect(parseProviderVisibility(value)).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek']);
+      expect(parseProviderVisibility(value)).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek', 'local']);
     }
     expect(parseProviderVisibility('{"version":1,"visible":[]}')).toEqual([]);
     expect(parseProviderVisibility('{"version":1,"visible":["codex","claude"]}')).toEqual(['codex', 'claude']);
@@ -44,6 +44,7 @@ describe('provider presentation preferences', () => {
       'claude',
       'openrouter',
       'deepseek',
+      'local',
     ]);
     store.setVisible('openrouter', false);
     expect(visibleProviderIds(providers, store.getSnapshot().visible, selection.provider)).toEqual([
@@ -101,7 +102,7 @@ describe('provider presentation preferences', () => {
     const cleared = new Event('storage');
     Object.defineProperty(cleared, 'key', { value: null });
     events.dispatchEvent(cleared);
-    expect(store.getSnapshot().visible).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek']);
+    expect(store.getSnapshot().visible).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek', 'local']);
     unsubscribe();
     expect(calls).toBe(3);
   });
@@ -112,8 +113,11 @@ describe('provider presentation preferences', () => {
         throw new Error('blocked');
       },
     });
-    expect(store.getSnapshot().visible).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek']);
+    expect(store.getSnapshot().visible).toEqual(['codex', 'claude', 'openrouter', 'xai', 'deepseek', 'local']);
     store.setVisible('deepseek', false);
-    expect(store.getSnapshot()).toEqual({ visible: ['codex', 'claude', 'openrouter', 'xai'], persistenceError: true });
+    expect(store.getSnapshot()).toEqual({
+      visible: ['codex', 'claude', 'openrouter', 'xai', 'local'],
+      persistenceError: true,
+    });
   });
 });

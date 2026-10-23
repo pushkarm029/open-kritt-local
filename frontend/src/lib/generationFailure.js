@@ -11,6 +11,7 @@ const HARNESS_LABELS = {
   codex: 'Codex CLI',
   'claude-code': 'Claude Code',
   'grok-build': 'Grok Build',
+  pi: 'Pi',
 };
 
 function text(value) {

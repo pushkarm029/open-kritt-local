@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .codex_auth import isolated_codex_home
+from .harnesses import HarnessError, local_ai_base_url
 from .provider_credentials import provider_environment
 
 LOGGER = logging.getLogger("open_kritt_engine")
@@ -25,6 +26,7 @@ ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_DEFAULT_MODEL_ID = "deepseek-flash"
 DEEPSEEK_THINKING_EFFORTS = ("low", "high", "max")
+LOCAL_AI_THINKING_EFFORTS = ("max",)
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models/user"
 OPENROUTER_DEFAULT_MODEL_ID = "z-ai/glm-5.2"
 XAI_MODELS_URL = "https://api.x.ai/v1/language-models"
@@ -546,6 +548,37 @@ def fetch_deepseek_models(api_key: str, timeout_seconds: float) -> tuple[list[di
     return models, default_model
 
 
+def fetch_local_models(base_url: str, api_key: str | None, timeout_seconds: float) -> tuple[list[dict[str, Any]], str]:
+    """List models served by the configured OpenAI-compatible local server."""
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        request = Request(f"{local_ai_base_url(base_url)}/models", headers=headers)
+        with urlopen(request, timeout=max(1.0, timeout_seconds)) as response:  # noqa: S310 - validated http(s) URL
+            raw_payload = response.read(MAX_HTTP_CATALOG_BYTES + 1)
+        if len(raw_payload) > MAX_HTTP_CATALOG_BYTES:
+            raise ModelCatalogError("Local AI model catalog response was too large")
+        payload = json.loads(raw_payload)
+    except (HarnessError, HTTPError, URLError, OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ModelCatalogError("Could not read the Local AI model catalog") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ModelCatalogError("Local AI model catalog response was invalid")
+
+    entries = [
+        {
+            "model": raw.get("id"),
+            "displayName": raw.get("id"),
+            "supportedReasoningEfforts": list(LOCAL_AI_THINKING_EFFORTS),
+        }
+        for raw in payload["data"][:MAX_CATALOG_MODELS]
+        if isinstance(raw, Mapping)
+    ]
+    models, default_model = normalize_catalog_models(entries)
+    if not models:
+        raise ModelCatalogError("Local AI server returned no models")
+    return models, default_model
+
+
 def fetch_xai_models(api_key: str, timeout_seconds: float) -> tuple[list[dict[str, Any]], str]:
     """List models available under the configured xAI API key."""
 
@@ -618,6 +651,7 @@ class ModelCatalogRefresher:
         fetch_codex: CatalogFetcher | None = None,
         fetch_anthropic: CatalogFetcher | None = None,
         fetch_deepseek: CatalogFetcher | None = None,
+        fetch_local: CatalogFetcher | None = None,
         fetch_openrouter: CatalogFetcher | None = None,
         fetch_xai: CatalogFetcher | None = None,
         codex_cli_gate: Any | None = None,
@@ -628,6 +662,7 @@ class ModelCatalogRefresher:
         self.fetch_codex = fetch_codex
         self.fetch_anthropic = fetch_anthropic
         self.fetch_deepseek = fetch_deepseek
+        self.fetch_local = fetch_local
         self.fetch_openrouter = fetch_openrouter
         self.fetch_xai = fetch_xai
         self.codex_cli_gate = codex_cli_gate
@@ -656,6 +691,13 @@ class ModelCatalogRefresher:
                 lambda: fetch_deepseek_models(env["DEEPSEEK_API_KEY"], self.timeout_seconds)
             )
             outcomes["deepseek"] = self._refresh_provider("deepseek", fetch_deepseek)
+        if _clean_text(env.get("LOCAL_AI_BASE_URL")):
+            fetch_local = self.fetch_local or (
+                lambda: fetch_local_models(
+                    env["LOCAL_AI_BASE_URL"], _clean_text(env.get("LOCAL_AI_API_KEY")), self.timeout_seconds
+                )
+            )
+            outcomes["local"] = self._refresh_provider("local", fetch_local)
         if _clean_text(env.get("OPENROUTER_API_KEY")):
             fetch_openrouter = self.fetch_openrouter or (
                 lambda: fetch_openrouter_models(env["OPENROUTER_API_KEY"], self.timeout_seconds)

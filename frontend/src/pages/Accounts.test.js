@@ -32,6 +32,15 @@ describe('expired Codex login', () => {
     expect(html).toContain('Quota usage is hidden');
   });
 
+  it('labels Local AI actions as server URL changes', () => {
+    expect(providerActionLabel({ id: 'local', management: 'endpoint', configured: false, accounts: [] })).toBe(
+      'Set server URL'
+    );
+    expect(providerActionLabel({ id: 'local', management: 'endpoint', configured: true, accounts: [] })).toBe(
+      'Change server URL'
+    );
+  });
+
   it('changes the provider action from adding an account to signing in again', () => {
     expect(
       providerActionLabel({
